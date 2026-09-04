@@ -1,0 +1,1738 @@
+import React, { useState, useRef, useMemo, useCallback, useEffect } from 'react';
+import * as XLSX from 'xlsx';
+import {
+  BarChart, Bar, ComposedChart, Line, LineChart, XAxis, YAxis, CartesianGrid,
+  Tooltip, ResponsiveContainer, Cell, Legend, LabelList, ReferenceLine,
+} from 'recharts';
+import {
+  Upload, FileSpreadsheet, AlertTriangle, Search, Download, ChevronUp,
+  ChevronDown, RotateCcw, Loader2, Truck, TrendingUp, Filter, Info,
+  ArrowUpDown, RefreshCw, ClipboardList, Radar, Package, CheckCircle2,
+  Eye, EyeOff,
+} from 'lucide-react';
+
+/* ------------------------------------------------------------------ */
+/*  Tokens — paleta institucional Petrobras (verde/amarelo em fundo    */
+/*  branco) expressa com tons e escala de superfícies no estilo        */
+/*  Material/Google (cantos arredondados, elevação suave).             */
+/*  Validar hexadecimais oficiais com o Manual de Marca antes de       */
+/*  publicar em produção.                                              */
+/* ------------------------------------------------------------------ */
+const C = {
+  grafite: '#202124',
+  grafiteMedio: '#5F6368',
+  grafiteClaro: '#9AA0A6',
+  linha: '#E8EAED',
+  painel: '#F1F3F4',
+  fundo: '#FFFFFF',
+  verdeHeader: '#0B6E3A',
+  verde: '#00873E',
+  verdeSinal: '#12A150',
+  verdeTint: '#E6F4EA',
+  verdeTexto: '#0B6E3A',
+  amarelo: '#F9AB00',
+  amareloLinha: '#B45F00',
+  amareloTexto: '#8A5700',
+  amareloTint: '#FEF7E0',
+  vermelho: '#D93025',
+  vermelhoTexto: '#B0271B',
+  vermelhoTint: '#FCE8E6',
+};
+
+const CATEGORIES = [
+  'Aguardando documentação de transporte',
+  'Atraso no apontamento de entrega - item no prazo',
+  'Condições Meteorológicas',
+  'Demanda extemporânea/Atraso na programação marítima',
+  'Falha na coleta/Material programado e não coletado',
+  'Falha no apontamento de entrega pelo porto',
+  'Falta de Equipamento de Transporte',
+  'Falta de saldo para agendamento no porto',
+  'Indisponibilidade de motorista',
+  'Indisponibilidade Destino',
+  'Indisponibilidade Origem',
+  'Material Extraviado',
+  'Material Indisponível',
+  'Material Recusado',
+  'Retenção de via',
+  'RT imperfeita/Pendência de informação no SAP',
+  'Sistemas Indisponíveis',
+];
+const REVISAO = 'Revisão manual necessária';
+const SEM_JUSTIFICATIVA = 'Sem justificativa informada';
+
+const STAGES = { UPLOAD: 'upload', READING: 'reading', MAPPING: 'mapping', CLASSIFYING: 'classifying', DONE: 'done', ERROR: 'error' };
+const MAX_FILE_MB = 15;
+const FONT_MONO = "'IBM Plex Mono', ui-monospace, monospace";
+
+function CausaAiLogo({ size = 48 }) {
+  return <img src="assets/causaai-optt-logo.png" alt="CausaAI - OPTT" style={{ width: size, height: size, display: 'block', objectFit: 'contain', borderRadius: 9, background: '#FFFFFF' }} />;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Helpers                                                            */
+/* ------------------------------------------------------------------ */
+function normalize(str) {
+  return (str ?? '').toString().normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
+}
+
+const COLUMN_HINTS = {
+  transportadora: ['transportadora', 'carrier', 'fornecedor de transporte', 'transporte'],
+  pedido: ['numero do pedido', 'nº do pedido', 'no pedido', 'nota fiscal', 'numero da nf', 'nf', 'entrega', 'romaneio', 'pedido'],
+  dataPrevista: ['data prevista', 'previsao de entrega', 'data prometida', 'prazo de entrega', 'previsto'],
+  dataReal: ['data real de entrega', 'data real', 'data de entrega', 'data efetiva', 'realizada'],
+  justificativa: ['justificativa', 'motivo do atraso', 'motivo', 'observacao', 'descricao do atraso', 'causa do atraso'],
+};
+
+function detectColumns(headers) {
+  const norm = headers.map(normalize);
+  const mapping = {};
+  Object.entries(COLUMN_HINTS).forEach(([field, hints]) => {
+    let bestIdx = -1, bestScore = 0;
+    norm.forEach((h, idx) => {
+      hints.forEach((hint) => {
+        if (h.includes(hint) && hint.length > bestScore) { bestScore = hint.length; bestIdx = idx; }
+      });
+    });
+    mapping[field] = bestIdx >= 0 ? headers[bestIdx] : '';
+  });
+  return mapping;
+}
+
+function parseDateVal(v) {
+  if (v === '' || v === null || v === undefined) return null;
+  if (v instanceof Date && !isNaN(v.getTime())) return v;
+  const s = String(v).trim();
+  const br = s.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})$/);
+  if (br) {
+    let [, d, m, y] = br;
+    if (y.length === 2) y = '20' + y;
+    const dt = new Date(Number(y), Number(m) - 1, Number(d));
+    return isNaN(dt.getTime()) ? null : dt;
+  }
+  const iso = new Date(s);
+  return isNaN(iso.getTime()) ? null : iso;
+}
+
+function fmtDate(d) { return d ? d.toLocaleDateString('pt-BR') : '—'; }
+
+// Aceita apenas e-mails com formato válido e domínio EXATO @petrobras.com.br
+// (evita falso-positivo do tipo "alguem@naopetrobras.com.br").
+function isValidPetrobrasEmail(email) {
+  const e = (email ?? '').toString().trim().toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e)) return false;
+  return e.split('@').pop() === 'petrobras.com.br';
+}
+
+function matchCategory(str) {
+  if (!str) return null;
+  const exact = CATEGORIES.find((c) => c === str);
+  if (exact) return exact;
+  const n = normalize(str);
+  return CATEGORIES.find((c) => normalize(c) === n) || null;
+}
+
+const numFmt = new Intl.NumberFormat('pt-BR');
+const CHUNK_SIZE = 300; // linhas processadas por "fatia" antes de ceder o thread principal
+const AI_BATCH_SIZE = 8; // justificativas por chamada, quando a IA opcional está ativada
+// Arquivos HTML abertos direto do disco (duplo clique) rodam com origem
+// "null"/"file://", que muitas APIs (inclusive a da Anthropic) recusam por
+// política de CORS. Detectamos isso para avisar o usuário com clareza em
+// vez de só mostrar um erro genérico de rede.
+const IS_FILE_PROTOCOL = typeof window !== 'undefined' && window.location && window.location.protocol === 'file:';
+
+// Hash FNV-1a determinístico — transforma o texto normalizado da
+// justificativa numa chave curta e estável, usada para guardar correções
+// aprendidas (o mesmo texto sempre gera a mesma chave).
+function hashText(s) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(36);
+}
+function learnedKeyFor(normalizedText) {
+  return `aprendido:v1:${hashText(normalizedText)}`;
+}
+
+function greenShade(i, total) {
+  const dark = [11, 110, 58], light = [149, 214, 178];
+  const t = total <= 1 ? 0 : i / (total - 1);
+  const rgb = dark.map((d, idx) => Math.round(d + (light[idx] - d) * t));
+  return `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Passo opcional com IA — desligado por padrão. Só é usado, com a     */
+/*  chave de API que o próprio usuário informar, para tentar classificar */
+/*  o que o motor de regras local deixou em "Revisão manual necessária". */
+/* ------------------------------------------------------------------ */
+function buildAiSystemPrompt() {
+  return `Você é um especialista em logística, transporte rodoviário e operações portuárias, atuando como o segundo nível de análise de um sistema de classificação de atrasos de entrega.
+
+IMPORTANTE SOBRE O CONTEXTO: as justificativas que você vai receber já passaram por um motor de regras baseado em correspondência literal de palavras-chave e NÃO puderam ser classificadas com segurança por ele — ou seja, não contêm nenhum termo exato que bata diretamente numa regra. Por isso, sua análise deve ser DIFERENTE da busca por palavras-chave: leia cada frase por inteiro e identifique a causa raiz pelo CONTEXTO e pelo SENTIDO, mesmo quando a redação for indireta, incompleta, cheia de gírias internas, erros de digitação, siglas não convencionais ou frases mal formadas. Você tem capacidade de compreensão que um motor de regras não tem — use-a. Não hesite em atribuir confiança alta quando o contexto deixar a causa clara, mesmo que nenhuma palavra "óbvia" apareça no texto; evite jogar tudo para baixa confiança só por cautela.
+
+Classifique cada justificativa em EXATAMENTE UMA das 17 categorias fechadas abaixo. Nunca invente categorias fora da lista.
+
+Categorias fechadas:
+${CATEGORIES.map((c, i) => `${i + 1}. ${c}`).join('\n')}
+
+Dicas de domínio para resolver ambiguidades pelo contexto:
+- "Apontamento" é o registro no sistema, não a entrega física. Se a entrega ocorreu no prazo mas o atraso é só um erro de registro/lançamento, use "Atraso no apontamento de entrega - item no prazo"; se a falha de registro foi do porto, use "Falha no apontamento de entrega pelo porto".
+- "RT" = Romaneio de Transporte. Pendência de dado, nota ou informação no SAP/RT usa "RT imperfeita/Pendência de informação no SAP" — diferente de o sistema estar fora do ar, que é "Sistemas Indisponíveis".
+- Bloqueio de estrada, greve, interdição de via, fiscalização, retenção fiscal/alfandegária usa "Retenção de via".
+- Cliente/destino fechado, sem receber, sem espaço para descarregar usa "Indisponibilidade Destino"; fábrica/origem que não liberou o material a tempo usa "Indisponibilidade Origem".
+- Item sumiu/roubado/não localizado usa "Material Extraviado"; item existe mas não há estoque usa "Material Indisponível"; item foi entregue mas o destino rejeitou usa "Material Recusado".
+- Falta de caminhão/carreta/contêiner usa "Falta de Equipamento de Transporte"; falta de motorista disponível usa "Indisponibilidade de motorista".
+- Porto sem vaga/saldo para agendar operação usa "Falta de saldo para agendamento no porto"; navio atrasado, mudança de programação de navio usa "Demanda extemporânea/Atraso na programação marítima".
+- Chuva, temporal, ressaca, neblina, mau tempo usa "Condições Meteorológicas".
+- Documento de transporte (NF, CTe, licença) pendente de emissão usa "Aguardando documentação de transporte".
+- Coleta que não aconteceu porque o material programado não foi retirado usa "Falha na coleta/Material programado e não coletado".
+
+Para cada justificativa numerada que receber, devolva um objeto com:
+- "n": o número do item (inteiro)
+- "categoria": o texto EXATO de uma das 17 categorias acima
+- "confianca": inteiro de 0 a 100 com a certeza da classificação, refletindo genuinamente sua leitura do contexto
+- "racional": no máximo 15 palavras, em português, explicando a causa raiz identificada pelo contexto (não cite "palavra-chave")
+- "causaSecundaria": se outra categoria da lista também for mencionada como causa secundária, o texto exato dela; caso contrário null
+
+Regras:
+- Escolha sempre a causa RAIZ (a que efetivamente gerou o atraso), não um sintoma.
+- Só use "${REVISAO}" quando o texto for genuinamente incompreensível, contraditório ou vazio de sentido — não porque falta uma palavra-chave específica.
+- Nunca "chute" uma categoria sem fundamento no texto, mas também não subestime sua própria leitura de contexto.
+- Responda APENAS com um array JSON válido e compacto, sem markdown, sem texto antes ou depois, no formato: [{"n":1,"categoria":"...","confianca":85,"racional":"...","causaSecundaria":null}]`;
+}
+
+async function classifyBatchAI(items, apiKey) {
+  const listText = items.map((it, i) => `${i + 1}. "${it.replace(/"/g, "'").slice(0, 400)}"`).join('\n');
+  const response = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
+      'anthropic-dangerous-direct-browser-access': 'true',
+    },
+    body: JSON.stringify({
+      model: 'claude-sonnet-5',
+      max_tokens: 1000,
+      temperature: 0,
+      system: buildAiSystemPrompt(),
+      messages: [{ role: 'user', content: `Classifique estas ${items.length} justificativas de atraso:\n${listText}` }],
+    }),
+  });
+  if (!response.ok) {
+    let detail = '';
+    try { const errBody = await response.json(); detail = errBody?.error?.message || ''; } catch (e) { /* corpo não veio como JSON */ }
+    throw new Error(`Falha na API (status ${response.status})${detail ? ': ' + detail : ''}`);
+  }
+  const data = await response.json();
+  const text = (data.content || []).map((b) => b.text || '').join('');
+  const clean = text.replace(/```json/gi, '').replace(/```/g, '').trim();
+  const start = clean.indexOf('[');
+  const end = clean.lastIndexOf(']');
+  const jsonSlice = start >= 0 && end >= 0 ? clean.slice(start, end + 1) : clean;
+  return JSON.parse(jsonSlice);
+}
+
+/* ------------------------------------------------------------------ */
+/*  Agente 1 — motor de regras local (sem IA, sem token, sem rede)     */
+/*  As mesmas dicas de domínio usadas para orientar a classificação    */
+/*  viram, aqui, expressões regulares explícitas e auditáveis. Cada    */
+/*  padrão tem um rótulo legível, usado no racional exibido ao         */
+/*  usuário para explicar exatamente por que aquela categoria foi      */
+/*  escolhida.                                                         */
+/* ------------------------------------------------------------------ */
+const RULES = [
+  { categoria: 'Condições Meteorológicas', patterns: [
+    { re: /\bchuva/, label: 'chuva', w: 2 }, { re: /chuvoso/, label: 'chuvoso', w: 1 }, { re: /temporal/, label: 'temporal', w: 2 },
+    { re: /tempestade/, label: 'tempestade', w: 2 }, { re: /ressaca/, label: 'ressaca', w: 2 }, { re: /neblina|nevoeiro/, label: 'neblina/nevoeiro', w: 2 },
+    { re: /mau tempo|tempo ruim/, label: 'mau tempo', w: 2 }, { re: /condi[cç][aã]o(es)? climatic/, label: 'condições climáticas', w: 2 },
+    { re: /vento forte|ventania/, label: 'vento forte', w: 2 }, { re: /granizo/, label: 'granizo', w: 2 }, { re: /enchente|alagamento/, label: 'enchente/alagamento', w: 2 },
+    { re: /ciclone|furacao/, label: 'ciclone/furacão', w: 2 }, { re: /\bchove/, label: 'chove', w: 1 },
+  ]},
+  { categoria: 'Retenção de via', patterns: [
+    { re: /reten[cç][aã]o de via/, label: 'retenção de via', w: 3 }, { re: /\bretid[oa]\b/, label: 'retido(a)', w: 1 },
+    { re: /bloqueio/, label: 'bloqueio', w: 1 }, { re: /\bbloqueada\b/, label: 'bloqueada', w: 1 }, { re: /interdi[cç][aã]o|interditad/, label: 'interdição', w: 2 },
+    { re: /\bgreve\b/, label: 'greve', w: 2 }, { re: /paralisa[cç][aã]o/, label: 'paralisação', w: 2 }, { re: /fiscaliza[cç][aã]o/, label: 'fiscalização', w: 2 },
+    { re: /policia rodoviaria|\bblitz\b/, label: 'polícia rodoviária', w: 2 }, { re: /manifesta[cç][aã]o|\bprotesto\b/, label: 'manifestação/protesto', w: 2 },
+    { re: /pedagio/, label: 'pedágio', w: 2 }, { re: /colis[aã]o|tombamento/, label: 'colisão/tombamento', w: 2 },
+    { re: /congestionamento/, label: 'congestionamento', w: 1 }, { re: /acidente/, label: 'acidente', w: 1 },
+  ]},
+  { categoria: 'Demanda extemporânea/Atraso na programação marítima', patterns: [
+    { re: /navio.{0,20}atras/, label: 'navio atrasado', w: 3 }, { re: /atraso.{0,20}navio/, label: 'atraso do navio', w: 3 },
+    { re: /programa[cç][aã]o maritima/, label: 'programação marítima', w: 3 }, { re: /escala do navio/, label: 'escala do navio', w: 2 },
+    { re: /demanda extemporane/, label: 'demanda extemporânea', w: 3 }, { re: /atraca[cç][aã]o/, label: 'atracação', w: 2 },
+    { re: /janela do navio/, label: 'janela do navio', w: 2 }, { re: /mudan[cç]a de programa[cç][aã]o/, label: 'mudança de programação', w: 2 },
+    { re: /\bnavio\b/, label: 'navio', w: 1 }, { re: /embarca[cç][aã]o/, label: 'embarcação', w: 1 },
+    { re: /atendimento (alocado|programado).{0,35}fora do prazo/, label: 'atendimento alocado/programado fora do prazo', w: 5 },
+    { re: /demanda.{0,25}liberada.{0,25}prazo vencido/, label: 'demanda liberada com prazo vencido', w: 5 },
+    { re: /frota.{0,100}(realizando|em atendimento).{0,50}coleta/, label: 'frota ocupada em outra coleta', w: 4 },
+  ]},
+  { categoria: 'Falha na coleta/Material programado e não coletado', patterns: [
+    { re: /nao (foi )?coletad/, label: 'não coletado', w: 3 }, { re: /falha na coleta/, label: 'falha na coleta', w: 3 },
+    { re: /coleta nao realizada/, label: 'coleta não realizada', w: 3 }, { re: /material nao retirado/, label: 'material não retirado', w: 3 },
+    { re: /nao retirad/, label: 'não retirado', w: 2 }, { re: /coleta cancelad/, label: 'coleta cancelada', w: 3 }, { re: /sem coleta/, label: 'sem coleta', w: 2 },
+    { re: /\bcoleta\b/, label: 'coleta', w: 1 },
+  ]},
+  { categoria: 'Falha no apontamento de entrega pelo porto', patterns: [
+    { re: /porto.{0,25}apontamento/, label: 'apontamento pelo porto', w: 3 }, { re: /apontamento.{0,25}porto/, label: 'apontamento do porto', w: 3 },
+    { re: /porto nao apontou/, label: 'porto não apontou', w: 3 }, { re: /falha do porto/, label: 'falha do porto', w: 3 },
+    { re: /\btos\b.{0,15}(falha|erro)/, label: 'falha no TOS', w: 2 },
+  ]},
+  { categoria: 'Atraso no apontamento de entrega - item no prazo', patterns: [
+    { re: /apontamento.{0,20}(atraso|erro|falha|incorret)/, label: 'erro de apontamento', w: 3 },
+    { re: /entreg(a|ue).{0,15}no prazo.{0,25}apontamento/, label: 'entrega no prazo, apontamento com erro', w: 3 },
+    { re: /erro de (lan[cç]amento|apontamento)/, label: 'erro de lançamento', w: 3 }, { re: /falha no lan[cç]amento/, label: 'falha no lançamento', w: 3 },
+    { re: /\bapontamento\b/, label: 'apontamento', w: 1 },
+    { re: /status\s*7|finaliza[cç][aã]o.{0,35}atendimento/, label: 'finalização do Status 7', w: 4 },
+  ], exclude: [/porto/] },
+  { categoria: 'Falta de Equipamento de Transporte', patterns: [
+    { re: /falta de (caminh[aã]o|carreta|conteiner|veiculo|equipamento|frota)/, label: 'falta de equipamento', w: 3 },
+    { re: /sem (caminh[aã]o|carreta|conteiner|veiculo)/, label: 'sem veículo/carreta', w: 3 },
+    { re: /nao (tinha|tem|havia) (caminh[aã]o|carreta|conteiner|veiculo)/, label: 'não tinha veículo disponível', w: 3 },
+    { re: /equipamento indisponivel/, label: 'equipamento indisponível', w: 3 }, { re: /veiculo indisponivel/, label: 'veículo indisponível', w: 3 },
+    { re: /\bcarreta\b/, label: 'carreta', w: 1 }, { re: /\bconteiner\b/, label: 'contêiner', w: 1 }, { re: /\bfrota\b/, label: 'frota', w: 1 },
+    { re: /\bbroker\b.{0,30}\bveiculo\b/, label: 'broker sem veículo definido', w: 4 },
+    { re: /frota.{0,100}(tratativa de recusa|conclusao da devolucao).{0,120}(disponibilizada|nova demanda)/, label: 'frota indisponível por atendimento anterior', w: 5 },
+  ]},
+  { categoria: 'Falta de saldo para agendamento no porto', patterns: [
+    { re: /sem saldo/, label: 'sem saldo', w: 3 }, { re: /falta de saldo/, label: 'falta de saldo', w: 3 },
+    { re: /sem vaga no porto|porto sem vaga/, label: 'sem vaga no porto', w: 3 }, { re: /sem agendamento/, label: 'sem agendamento', w: 2 },
+    { re: /agendamento indisponivel/, label: 'agendamento indisponível', w: 2 }, { re: /porto lotado/, label: 'porto lotado', w: 3 }, { re: /sem slot/, label: 'sem slot', w: 2 },
+    { re: /\bsaldo\b/, label: 'saldo', w: 1 }, { re: /\bslot\b/, label: 'slot', w: 1 },
+    { re: /saida indevida.{0,35}porto/, label: 'saída indevida do porto', w: 4 },
+    { re: /agendamento.{0,35}cancelad/, label: 'agendamento cancelado', w: 4 },
+    { re: /^atraso no agendamento$/, label: 'atraso de agendamento sem outro contexto', w: 2 },
+  ]},
+  { categoria: 'Indisponibilidade de motorista', patterns: [
+    { re: /motorista nao compareceu|motorista nao apareceu/, label: 'motorista não compareceu', w: 3 }, { re: /sem motorista/, label: 'sem motorista', w: 3 },
+    { re: /falta de motorista/, label: 'falta de motorista', w: 3 }, { re: /motorista indisponivel/, label: 'motorista indisponível', w: 3 },
+    { re: /motorista doente|motorista atestado/, label: 'motorista doente/atestado', w: 3 }, { re: /motorista faltou/, label: 'motorista faltou', w: 3 },
+    { re: /sem condutor/, label: 'sem condutor', w: 2 }, { re: /\bmotorista\b/, label: 'motorista', w: 1 },
+  ]},
+  { categoria: 'Indisponibilidade Destino', patterns: [
+    { re: /destino fechado/, label: 'destino fechado', w: 3 }, { re: /cliente fechado/, label: 'cliente fechado', w: 3 },
+    { re: /porta[oõ]?\s?fechad/, label: 'portão fechado', w: 2 },
+    { re: /cliente nao recebeu/, label: 'cliente não recebeu', w: 3 }, { re: /sem espa[cç]o para descarregar/, label: 'sem espaço para descarregar', w: 3 },
+    { re: /destino nao disponivel/, label: 'destino não disponível', w: 3 }, { re: /recebimento indisponivel/, label: 'recebimento indisponível', w: 2 },
+    { re: /cliente nao estava/, label: 'cliente não estava', w: 2 }, { re: /estabelecimento fechado/, label: 'estabelecimento fechado', w: 2 },
+    { re: /descarga nao autorizada/, label: 'descarga não autorizada', w: 2 }, { re: /cliente ausente/, label: 'cliente ausente', w: 2 },
+    { re: /\bdestino\b/, label: 'destino', w: 1 }, { re: /\bdescarga\b/, label: 'descarga', w: 1 },
+    { re: /ausencia de orientacao.{0,80}agendamento/, label: 'orientação de agendamento indisponível no destino', w: 4 },
+    { re: /aguardando.{0,45}descarreg/, label: 'aguardando descarregamento no destino', w: 4 },
+    { re: /(operador|empilhadeira).{0,50}(descarga|descarreg)/, label: 'recurso de descarga indisponível no destino', w: 4 },
+  ]},
+  { categoria: 'Indisponibilidade Origem', patterns: [
+    { re: /origem nao liberou/, label: 'origem não liberou', w: 3 }, { re: /fabrica nao liberou/, label: 'fábrica não liberou', w: 3 },
+    { re: /origem indisponivel/, label: 'origem indisponível', w: 3 }, { re: /nao liberado pela origem/, label: 'não liberado pela origem', w: 3 },
+    { re: /fabrica fechada/, label: 'fábrica fechada', w: 2 }, { re: /produ[cç][aã]o atrasada/, label: 'produção atrasada', w: 2 },
+    { re: /atraso na libera[cç][aã]o/, label: 'atraso na liberação', w: 2 }, { re: /remetente nao liberou/, label: 'remetente não liberou', w: 2 },
+    { re: /\borigem\b/, label: 'origem', w: 1 }, { re: /\bfabrica\b/, label: 'fábrica', w: 1 }, { re: /\bremetente\b/, label: 'remetente', w: 1 },
+    { re: /(local|locais) de coleta.{0,55}regime administrativo/, label: 'origem em regime administrativo', w: 4 },
+    { re: /(apos|fora).{0,35}horario administrativo.{0,55}(coleta|inicio da coleta)/, label: 'coleta após horário da origem', w: 4 },
+    { re: /coleta.{0,110}(periodo noturno|conferencia previa)/, label: 'restrição operacional da coleta na origem', w: 4 },
+  ]},
+  { categoria: 'Material Extraviado', patterns: [
+    { re: /extraviad|extravio/, label: 'extravio', w: 3 }, { re: /\bsumiu\b/, label: 'sumiu', w: 2 }, { re: /\broubo\b|roubad/, label: 'roubo', w: 3 },
+    { re: /\bfurto\b/, label: 'furto', w: 3 }, { re: /nao localizad/, label: 'não localizado', w: 2 }, { re: /desaparecid/, label: 'desaparecido', w: 2 }, { re: /sinistro/, label: 'sinistro', w: 2 },
+  ]},
+  { categoria: 'Material Indisponível', patterns: [
+    { re: /sem estoque/, label: 'sem estoque', w: 3 }, { re: /falta de estoque/, label: 'falta de estoque', w: 3 },
+    { re: /material indisponivel/, label: 'material indisponível', w: 3 }, { re: /indisponibilidade de material/, label: 'indisponibilidade de material', w: 3 },
+    { re: /estoque zerado/, label: 'estoque zerado', w: 3 }, { re: /sem material/, label: 'sem material', w: 2 }, { re: /\bestoque\b/, label: 'estoque', w: 1 },
+  ]},
+  { categoria: 'Material Recusado', patterns: [
+    { re: /recebimento recusado/, label: 'recebimento recusado', w: 3 }, { re: /material recusado/, label: 'material recusado', w: 3 },
+    { re: /\brecusa\b|recusou|recusad/, label: 'recusa', w: 2 }, { re: /nao aceitou (a )?(carga|entrega|material)/, label: 'não aceitou a carga', w: 3 },
+    { re: /rejeitad/, label: 'rejeitado', w: 2 }, { re: /devolvid/, label: 'devolvido', w: 2 }, { re: /avari/, label: 'avaria', w: 1 }, { re: /danificad/, label: 'danificado', w: 1 },
+    { re: /nao era de sua responsabilidade/, label: 'destino recusou material fora de sua responsabilidade', w: 4 },
+    { re: /nao poderia realizar o recebimento/, label: 'destino impossibilitado de receber material', w: 4 },
+  ]},
+  { categoria: 'RT imperfeita/Pendência de informação no SAP', patterns: [
+    { re: /\brt\b.{0,20}(pendente|pendencia|incompleta|incorreta|errada|erro)/, label: 'RT com pendência', w: 3 },
+    { re: /romaneio.{0,20}(pendente|incompleto|incorreto|errado)/, label: 'romaneio com pendência', w: 3 },
+    { re: /sap.{0,20}(pendente|pendencia|incompleta|incorreta|dado incorreto|falta preencher)/, label: 'pendência no SAP', w: 3 },
+    { re: /pendencia de informa[cç][aã]o/, label: 'pendência de informação', w: 3 }, { re: /informa[cç][aã]o incompleta/, label: 'informação incompleta', w: 2 },
+    { re: /dado incorreto/, label: 'dado incorreto', w: 2 }, { re: /\bromaneio\b/, label: 'romaneio', w: 1 },
+    { re: /origens? de carregamento distintas?.{0,110}destinos? diferentes/, label: 'origens e destinos divergentes na RT', w: 4 },
+  ]},
+  { categoria: 'Sistemas Indisponíveis', patterns: [
+    { re: /sistema fora do ar/, label: 'sistema fora do ar', w: 3 }, { re: /sistema indisponivel/, label: 'sistema indisponível', w: 3 },
+    { re: /sap.{0,15}(fora do ar|indisponivel|caiu|instavel)/, label: 'SAP fora do ar', w: 3 },
+    { re: /tms.{0,15}(fora do ar|indisponivel|caiu)/, label: 'TMS fora do ar', w: 3 }, { re: /portal indisponivel/, label: 'portal indisponível', w: 2 },
+    { re: /sistema caiu|sistema travou/, label: 'sistema caiu/travou', w: 3 }, { re: /instabilidade no sistema/, label: 'instabilidade no sistema', w: 2 }, { re: /sem acesso ao sistema/, label: 'sem acesso ao sistema', w: 2 },
+    { re: /sap.{0,35}inoperante/, label: 'SAP inoperante', w: 4 },
+    { re: /(indisponibilidade.{0,35}sistema de agendamento|sistema de agendamento.{0,35}indisponivel)/, label: 'sistema de agendamento indisponível', w: 4 },
+  ]},
+  { categoria: 'Aguardando documentação de transporte', patterns: [
+    { re: /nota fiscal.{0,15}(pendente|atrasada|nao emitida|sem emissao)/, label: 'NF pendente', w: 3 },
+    { re: /emiss[aã]o.{0,20}nota fiscal|nota fiscal.{0,20}emiss[aã]o/, label: 'emissão de NF pendente', w: 3 },
+    { re: /aguardando emiss[aã]o/, label: 'aguardando emissão', w: 3 },
+    { re: /\bcte\b.{0,15}(pendente|nao emitid|atrasad)/, label: 'CTe pendente', w: 3 }, { re: /aguardando (a )?documenta/, label: 'aguardando documentação', w: 3 },
+    { re: /sem (a )?nota fiscal|falta (a )?nota fiscal/, label: 'sem nota fiscal', w: 2 }, { re: /licen[cç]a.{0,15}pendente/, label: 'licença pendente', w: 2 },
+    { re: /aguardando (nf|cte)/, label: 'aguardando NF/CTe', w: 2 }, { re: /nota fiscal/, label: 'nota fiscal', w: 1 }, { re: /\bcte\b/, label: 'CTe', w: 1 },
+    { re: /(falta|ausencia) de documentacao.{0,90}\b(nf|rt)\b/, label: 'NF ou RT pendente para carregamento', w: 4 },
+    { re: /aguardando.{0,35}\b(fgr|nea)\b/, label: 'FGR ou NEA pendente', w: 4 },
+  ]},
+];
+
+// Aplica o motor de regras a um texto e devolve a mesma estrutura que a
+// tabela e os gráficos já esperam. Determinístico: o mesmo texto sempre
+// produz exatamente o mesmo resultado, sem depender de rede ou token.
+// Cada padrão tem um peso (w) — frases específicas pesam mais do que
+// palavras-chave isoladas, o que amplia a cobertura sem perder precisão.
+function classifyLocal(justificativaOriginal) {
+  const text = normalize(justificativaOriginal);
+  const scores = RULES.map((rule) => {
+    if (rule.exclude && rule.exclude.some((re) => re.test(text))) return { categoria: rule.categoria, matched: [], score: 0 };
+    const matched = rule.patterns.filter((p) => p.re.test(text));
+    return { categoria: rule.categoria, matched, score: matched.reduce((s, p) => s + (p.w || 1), 0) };
+  }).filter((s) => s.score > 0).sort((a, b) => b.score - a.score);
+
+  if (scores.length === 0) {
+    return { categoria: REVISAO, confianca: 0, racional: 'Nenhum termo das regras definidas foi reconhecido no texto — necessário revisar manualmente.', causaSecundaria: null };
+  }
+  const top = scores[0];
+  const tiedWithTop = scores.filter((s) => s.score === top.score);
+  if (tiedWithTop.length > 1) {
+    return {
+      categoria: REVISAO, confianca: 0,
+      racional: `Termos ambíguos entre "${tiedWithTop[0].categoria}" e "${tiedWithTop[1].categoria}" — necessário revisar manualmente.`,
+      causaSecundaria: matchCategory(tiedWithTop[1].categoria),
+    };
+  }
+  const confianca = top.score >= 5 ? 95 : top.score >= 3 ? 85 : top.score >= 2 ? 75 : 62;
+  const labels = top.matched.sort((a, b) => (b.w || 1) - (a.w || 1)).slice(0, 2).map((m) => m.label);
+  const racional = `Termo${labels.length > 1 ? 's' : ''} identificado${labels.length > 1 ? 's' : ''} pela regra: "${labels.join('", "')}".`;
+  const causaSecundaria = scores.length > 1 ? matchCategory(scores[1].categoria) : null;
+  return { categoria: top.categoria, confianca, racional, causaSecundaria };
+}
+
+/* ------------------------------------------------------------------ */
+/*  Componente principal                                               */
+/* ------------------------------------------------------------------ */
+export default function App() {
+  const [authEmail, setAuthEmail] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [loginError, setLoginError] = useState('');
+
+  useEffect(() => {
+    document.title = 'CausaAI - OPTT';
+    let favicon = document.querySelector('link[rel~="icon"]');
+    if (!favicon) {
+      favicon = document.createElement('link');
+      favicon.rel = 'icon';
+      document.head.appendChild(favicon);
+    }
+    favicon.type = 'image/png';
+    favicon.href = 'assets/causaai-optt-logo.png';
+  }, []);
+
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        const res = await window.storage.get('auth_email', false);
+        if (mounted && res && res.value && isValidPetrobrasEmail(res.value)) setAuthEmail(res.value);
+      } catch (e) { /* ainda não autenticado neste navegador */ }
+      if (mounted) setAuthLoading(false);
+    })();
+    return () => { mounted = false; };
+  }, []);
+
+  const handleLogin = async (rawEmail) => {
+    const trimmed = (rawEmail || '').trim();
+    if (!isValidPetrobrasEmail(trimmed)) {
+      setLoginError('Este e-mail não tem acesso a este sistema.');
+      return;
+    }
+    setLoginError('');
+    setAuthEmail(trimmed);
+    try { await window.storage.set('auth_email', trimmed, false); } catch (e) { /* segue mesmo se não conseguir persistir */ }
+  };
+
+  const handleLogout = async () => {
+    setAuthEmail(null);
+    try { await window.storage.delete('auth_email', false); } catch (e) {}
+  };
+
+  const [stage, setStage] = useState(STAGES.UPLOAD);
+  const [errorMsg, setErrorMsg] = useState('');
+  const [dragOver, setDragOver] = useState(false);
+  const [fileName, setFileName] = useState('');
+
+  const [sheetsConfig, setSheetsConfig] = useState([]);
+  const [mappingError, setMappingError] = useState('');
+
+  const [useAI, setUseAI] = useState(false);
+  const [aiApiKey, setAiApiKeyRaw] = useState('');
+  useEffect(() => {
+    try { window.storage?.delete('ai_api_key', false).catch(() => {}); } catch (e) {}
+  }, []);
+  const setAiApiKey = (k) => {
+    setAiApiKeyRaw(k);
+  };
+
+  const [results, setResults] = useState([]);
+  const [corrections, setCorrections] = useState({});
+  const [draftCorrections, setDraftCorrections] = useState({});
+  const [validations, setValidations] = useState({});
+  const [progress, setProgress] = useState({ done: 0, total: 0 });
+  const [aiProgress, setAiProgress] = useState(null);
+  const [aiWarning, setAiWarning] = useState('');
+  const cancelRef = useRef(false);
+
+  const [search, setSearch] = useState('');
+  const [fTransportadora, setFTransportadora] = useState('Todas');
+  const [fCategoria, setFCategoria] = useState('Todas');
+  const [minConf, setMinConf] = useState(0);
+  const [maxConf, setMaxConf] = useState(100);
+  const [onlyReview, setOnlyReview] = useState(false);
+  const [dateFrom, setDateFrom] = useState('');
+  const [dateTo, setDateTo] = useState('');
+  const [sortBy, setSortBy] = useState('linhaOriginal');
+  const [sortDir, setSortDir] = useState('asc');
+  const [page, setPage] = useState(1);
+  const PAGE_SIZE = 25;
+
+  const resetAll = useCallback(() => {
+    setStage(STAGES.UPLOAD); setErrorMsg(''); setFileName('');
+    setSheetsConfig([]); setMappingError(''); setResults([]); setCorrections({}); setDraftCorrections({}); setValidations({});
+    setProgress({ done: 0, total: 0 }); setAiProgress(null); setAiWarning('');
+    setSearch(''); setFTransportadora('Todas'); setFCategoria('Todas');
+    setMinConf(0); setMaxConf(100); setOnlyReview(false);
+    setDateFrom(''); setDateTo(''); setSortBy('linhaOriginal'); setSortDir('asc'); setPage(1);
+    cancelRef.current = false;
+  }, []);
+
+  const handleFile = useCallback(async (file) => {
+    if (!file) return;
+    if (!/\.(xlsx|xls)$/i.test(file.name)) {
+      setErrorMsg('Formato não suportado. Envie um arquivo .xlsx ou .xls.');
+      setStage(STAGES.ERROR); return;
+    }
+    if (file.size > MAX_FILE_MB * 1024 * 1024) {
+      setErrorMsg(`O arquivo tem mais de ${MAX_FILE_MB} MB. Divida em partes menores e tente novamente.`);
+      setStage(STAGES.ERROR); return;
+    }
+    setFileName(file.name);
+    setStage(STAGES.READING);
+    // Adia o trabalho pesado (síncrono) para o próximo tick, garantindo que a
+    // tela de "lendo arquivo" seja pintada antes de travar a thread principal.
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    try {
+      const buf = await file.arrayBuffer();
+      const wb = XLSX.read(buf, { type: 'array', cellDates: true, dense: true });
+      if (!wb.SheetNames || wb.SheetNames.length === 0) throw new Error('sem-abas');
+      const sheets = wb.SheetNames.map((name) => {
+        const ws = wb.Sheets[name];
+        const raw = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '', blankrows: false, raw: true });
+        if (!raw.length) return { name, headers: [], rows: [], rowCount: 0, included: false, mapping: {} };
+        const headers = raw[0].map((h) => (h === '' || h == null ? '(sem nome)' : String(h).trim()));
+        const rows = raw.slice(1).filter((r) => r.some((cell) => cell !== '' && cell !== null && cell !== undefined));
+        return { name, headers, rows, rowCount: rows.length, included: rows.length > 0, mapping: detectColumns(headers) };
+      });
+      if (sheets.filter((s) => s.rowCount > 0).length === 0) throw new Error('sem-dados');
+      setSheetsConfig(sheets); setMappingError(''); setStage(STAGES.MAPPING);
+    } catch (e) {
+      setErrorMsg(e.message === 'sem-dados'
+        ? 'O arquivo foi lido, mas nenhuma aba contém dados. Verifique o conteúdo e envie novamente.'
+        : 'Não foi possível ler o arquivo. Confirme se é uma planilha .xlsx válida e tente novamente.');
+      setStage(STAGES.ERROR);
+    }
+  }, []);
+
+  const onDrop = useCallback((e) => {
+    e.preventDefault(); setDragOver(false);
+    handleFile(e.dataTransfer.files && e.dataTransfer.files[0]);
+  }, [handleFile]);
+
+  const updateSheetMapping = (sheetName, field, header) => {
+    setSheetsConfig((prev) => prev.map((s) => s.name === sheetName ? { ...s, mapping: { ...s.mapping, [field]: header } } : s));
+  };
+  const toggleSheetIncluded = (sheetName) => {
+    setSheetsConfig((prev) => prev.map((s) => s.name === sheetName ? { ...s, included: !s.included } : s));
+  };
+
+  const confirmMapping = async () => {
+    const included = sheetsConfig.filter((s) => s.included && s.rowCount > 0);
+    if (included.length === 0) { setMappingError('Selecione ao menos uma aba com dados para continuar.'); return; }
+    if (!included.some((s) => s.mapping.justificativa)) {
+      setMappingError('Selecione a coluna de Justificativa em ao menos uma aba incluída — é ela que será classificada.');
+      return;
+    }
+    if (useAI && !aiApiKey) {
+      setMappingError('Você ligou a opção de usar IA, mas ainda não salvou uma chave de API. Salve a chave ou desligue a opção para continuar.');
+      return;
+    }
+    setMappingError('');
+
+    const allItems = [];
+    included.forEach((s) => {
+      s.rows.forEach((rowArr, idx) => {
+        const rowNum = idx + 2;
+        const getVal = (field) => {
+          const h = s.mapping[field];
+          if (!h) return '';
+          const colIdx = s.headers.indexOf(h);
+          const v = colIdx >= 0 ? rowArr[colIdx] : '';
+          return v === null || v === undefined ? '' : v;
+        };
+        allItems.push({
+          uid: `${s.name}__${rowNum}`, abaOrigem: s.name, linhaOriginal: rowNum,
+          transportadora: String(getVal('transportadora') || '(não informado)').trim() || '(não informado)',
+          pedido: String(getVal('pedido') || '').trim(),
+          dtPrevista: parseDateVal(getVal('dataPrevista')),
+          dtReal: parseDateVal(getVal('dataReal')),
+          justificativaOriginal: String(getVal('justificativa') || '').trim(),
+        });
+      });
+    });
+
+    const toClassify = allItems.filter((it) => it.justificativaOriginal.length > 0);
+    const empty = allItems.filter((it) => it.justificativaOriginal.length === 0);
+    const emptyResults = empty.map((it) => ({ ...it, categoriaPadronizada: SEM_JUSTIFICATIVA, confiancaPct: 0, racionalIA: 'Nenhuma justificativa foi informada para esta entrega.', causaSecundaria: null }));
+
+    setStage(STAGES.CLASSIFYING);
+    cancelRef.current = false;
+    setProgress({ done: 0, total: toClassify.length });
+    setAiWarning('');
+
+    // Agrupa justificativas com o MESMO texto normalizado — cada texto único
+    // passa pelo motor de regras uma única vez, e o resultado é aplicado a
+    // todas as linhas que compartilham essa frase. Como as regras são
+    // determinísticas, o mesmo texto SEMPRE recebe a mesma categoria,
+    // dentro desta execução e em qualquer execução futura — sem cache,
+    // sem token e sem chamada de rede.
+    const uniqueMap = new Map(); // normText -> { sampleText, uids: [] }
+    toClassify.forEach((item) => {
+      const norm = normalize(item.justificativaOriginal);
+      if (!uniqueMap.has(norm)) uniqueMap.set(norm, { sampleText: item.justificativaOriginal, uids: [] });
+      uniqueMap.get(norm).uids.push(item.uid);
+    });
+    const uniqueEntries = Array.from(uniqueMap.entries());
+    const classifiedByNorm = new Map();
+
+    // Consulta primeiro o que já foi ensinado ao sistema (correções manuais
+    // feitas em execuções anteriores) — essas têm prioridade sobre as
+    // regras padrão e não contam como "revisão manual" de novo.
+    let learnedRows = 0;
+    if (typeof window !== 'undefined' && window.storage) {
+      const lookups = await Promise.all(uniqueEntries.map(async ([norm, info]) => {
+        try {
+          const res = await window.storage.get(learnedKeyFor(norm), false);
+          if (res && res.value) return [norm, res.value];
+        } catch (e) { /* ainda não foi ensinado */ }
+        return [norm, null];
+      }));
+      lookups.forEach(([norm, categoria]) => {
+        if (categoria) {
+          classifiedByNorm.set(norm, { categoria, confianca: 100, racional: 'Classificação aprendida a partir de uma correção manual anterior.', causaSecundaria: null });
+          learnedRows += uniqueMap.get(norm).uids.length;
+        }
+      });
+    }
+    setProgress({ done: learnedRows, total: toClassify.length });
+
+    const toRunLocally = uniqueEntries.filter(([norm]) => !classifiedByNorm.has(norm));
+
+    // Processa em fatias, cedendo o thread principal entre elas, para a
+    // barra de progresso aparecer e a página não travar em arquivos grandes.
+    for (let i = 0; i < toRunLocally.length; i += CHUNK_SIZE) {
+      if (cancelRef.current) break;
+      const chunk = toRunLocally.slice(i, i + CHUNK_SIZE);
+      chunk.forEach(([norm, info]) => { classifiedByNorm.set(norm, classifyLocal(info.sampleText)); });
+      const doneInChunk = chunk.reduce((sum, [, info]) => sum + info.uids.length, 0);
+      setProgress((p) => ({ ...p, done: Math.min(p.total, p.done + doneInChunk) }));
+      if (i + CHUNK_SIZE < toRunLocally.length) await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+
+    // Passo opcional com IA: só roda se o usuário ligou a opção e informou
+    // uma chave. Revisa tanto o que as regras deixaram em "Revisão manual
+    // necessária" quanto o que as regras classificaram com confiança baixa
+    // (abaixo de 85%) — é justamente nesses casos que a leitura de
+    // contexto da IA tende a superar um casamento de palavra-chave fraco.
+    let aiFailed = false;
+    let aiErrorDetail = '';
+    if (useAI && aiApiKey && !cancelRef.current) {
+      const needsAI = uniqueEntries.filter(([norm]) => {
+        const c = classifiedByNorm.get(norm);
+        return c && (c.categoria === REVISAO || c.confianca < 85);
+      });
+      const aiBatches = [];
+      for (let i = 0; i < needsAI.length; i += AI_BATCH_SIZE) aiBatches.push(needsAI.slice(i, i + AI_BATCH_SIZE));
+      const aiTotalRows = needsAI.reduce((sum, [, info]) => sum + info.uids.length, 0);
+      let aiDoneRows = 0;
+      setAiProgress({ done: 0, total: aiTotalRows });
+      let anyBatchSucceeded = false;
+      let lastAiError = '';
+      for (const batch of aiBatches) {
+        if (cancelRef.current) break;
+        try {
+          const parsed = await classifyBatchAI(batch.map(([, info]) => info.sampleText), aiApiKey);
+          anyBatchSucceeded = true;
+          batch.forEach(([norm], idx) => {
+            const found = Array.isArray(parsed) ? parsed.find((p) => Number(p.n) === idx + 1) : null;
+            let categoria = found ? matchCategory(found.categoria) : null;
+            let confianca = found ? Math.max(0, Math.min(100, Math.round(Number(found.confianca) || 0))) : 0;
+            let racional = found && found.racional ? `IA: ${String(found.racional).slice(0, 200)}` : 'IA não conseguiu classificar este item.';
+            const causaSecundaria = found ? matchCategory(found.causaSecundaria) : null;
+            if (!categoria) { categoria = REVISAO; confianca = 0; }
+            if (confianca < 60) categoria = REVISAO;
+            classifiedByNorm.set(norm, { categoria, confianca, racional, causaSecundaria });
+          });
+        } catch (e) {
+          lastAiError = (e && e.message) ? e.message : String(e);
+          console.error('Falha na chamada de IA:', lastAiError);
+        }
+        aiDoneRows += batch.reduce((sum, [, info]) => sum + info.uids.length, 0);
+        setAiProgress({ done: aiDoneRows, total: aiTotalRows });
+      }
+      if (aiBatches.length > 0 && !anyBatchSucceeded && !cancelRef.current) { aiFailed = true; aiErrorDetail = lastAiError; }
+      setAiProgress(null);
+    }
+
+
+    const cancelFallback = { categoria: REVISAO, confianca: 0, racional: 'Processamento cancelado pelo usuário antes da classificação.', causaSecundaria: null };
+    const classifiedResults = toClassify.map((item) => {
+      const norm = normalize(item.justificativaOriginal);
+      const result = classifiedByNorm.get(norm) || cancelFallback;
+      return { ...item, categoriaPadronizada: result.categoria, confiancaPct: result.confianca, racionalIA: result.racional, causaSecundaria: result.causaSecundaria };
+    });
+
+    const combined = [...emptyResults, ...classifiedResults].sort((a, b) => a.abaOrigem !== b.abaOrigem ? a.abaOrigem.localeCompare(b.abaOrigem, 'pt-BR') : a.linhaOriginal - b.linhaOriginal);
+    setResults(combined);
+    if (aiFailed) {
+      const fileNote = IS_FILE_PROTOCOL
+        ? ' Você está com o arquivo aberto direto do disco (file://) — isso costuma ser bloqueado por CORS. Tente servir o HTML por um servidor local (ex.: "python -m http.server 8000" e acessar http://localhost:8000).'
+        : '';
+      setAiWarning(`A IA foi ativada, mas nenhuma chamada teve sucesso. O resultado abaixo usa apenas as regras locais. Detalhe do erro: ${aiErrorDetail || 'desconhecido (verifique o console do navegador, F12)'}.${fileNote}`);
+    }
+    setStage(STAGES.DONE);
+  };
+
+  const cancelClassification = () => { cancelRef.current = true; };
+  const setCorrection = (uid, categoria) => {
+    setCorrections((prev) => ({ ...prev, [uid]: categoria }));
+    // Ensina a correção ao sistema: da próxima vez que este MESMO texto
+    // aparecer (neste ou em outro arquivo), a categoria correta será
+    // aplicada automaticamente, sem precisar corrigir de novo.
+    const row = results.find((r) => r.uid === uid);
+    if (row && row.justificativaOriginal && typeof window !== 'undefined' && window.storage) {
+      const norm = normalize(row.justificativaOriginal);
+      window.storage.set(learnedKeyFor(norm), categoria, false).catch(() => {});
+    }
+  };
+  const clearCorrection = (uid) => {
+    setCorrections((prev) => { const n = { ...prev }; delete n[uid]; return n; });
+    const row = results.find((r) => r.uid === uid);
+    if (row && row.justificativaOriginal && typeof window !== 'undefined' && window.storage) {
+      const norm = normalize(row.justificativaOriginal);
+      window.storage.delete(learnedKeyFor(norm), false).catch(() => {});
+    }
+  };
+  const setDraftCorrection = (uid, categoria) => {
+    setDraftCorrections((prev) => ({ ...prev, [uid]: categoria }));
+  };
+  const applyDraftCorrection = (uid) => {
+    const categoria = draftCorrections[uid];
+    const row = results.find((r) => r.uid === uid);
+    if (!categoria || !row) return;
+    if (categoria === row.categoriaPadronizada) clearCorrection(uid);
+    else setCorrection(uid, categoria);
+    setDraftCorrections((prev) => { const next = { ...prev }; delete next[uid]; return next; });
+  };
+  const setValidation = (uid, validado) => {
+    setValidations((prev) => ({ ...prev, [uid]: validado }));
+  };
+
+  const displayResults = useMemo(() => results.map((r) => {
+    const corrigidoManualmente = Boolean(corrections[r.uid]) && corrections[r.uid] !== r.categoriaPadronizada;
+    return {
+      ...r,
+      categoriaFinal: corrections[r.uid] || r.categoriaPadronizada,
+      corrigidoManualmente,
+      categoriaSelecionada: draftCorrections[r.uid] || null,
+      validado: Boolean(validations[r.uid]),
+      racionalFinal: corrigidoManualmente
+        ? `Categoria corrigida manualmente pelo usuário (sugestão original: "${r.categoriaPadronizada}" — ${r.racionalIA}).`
+        : r.racionalIA,
+    };
+  }), [results, corrections, draftCorrections, validations]);
+
+  const kpis = useMemo(() => {
+    const total = displayResults.length;
+    const revisao = displayResults.filter((r) => r.categoriaFinal === REVISAO).length;
+    const semJust = displayResults.filter((r) => r.categoriaFinal === SEM_JUSTIFICATIVA).length;
+    const classificado = total - revisao - semJust;
+    const counts = {};
+    displayResults.forEach((r) => { counts[r.categoriaFinal] = (counts[r.categoriaFinal] || 0) + 1; });
+    let topCat = '—', topCount = 0;
+    Object.entries(counts).forEach(([k, v]) => { if (k !== REVISAO && k !== SEM_JUSTIFICATIVA && v > topCount) { topCat = k; topCount = v; } });
+    return { total, pctClassificado: total ? Math.round((classificado / total) * 100) : 0, pctRevisao: total ? Math.round((revisao / total) * 100) : 0, revisaoCount: revisao, topCat, topCount };
+  }, [displayResults]);
+
+  const validationStats = useMemo(() => {
+    const total = displayResults.length;
+    const validado = displayResults.filter((r) => r.validado).length;
+    const ajustado = displayResults.filter((r) => r.corrigidoManualmente).length;
+    return {
+      total,
+      validado,
+      pendente: total - validado,
+      ajustado,
+      taxaValidacao: total ? Math.round((validado / total) * 100) : 0,
+      taxaAjuste: total ? Math.round((ajustado / total) * 100) : 0,
+    };
+  }, [displayResults]);
+
+  const paretoData = useMemo(() => {
+    const counts = {};
+    displayResults.forEach((r) => { counts[r.categoriaFinal] = (counts[r.categoriaFinal] || 0) + 1; });
+    const total = displayResults.length || 1;
+    const entries = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+    const totalReal = entries.filter(([k]) => k !== REVISAO && k !== SEM_JUSTIFICATIVA).length;
+    let running = 0, realIdx = 0;
+    return entries.map(([nome, valor]) => {
+      running += valor;
+      // Destaca estritamente as barras com acumulado de até 80%.
+      const destaquePareto = running <= total * 0.8;
+      let fill;
+      if (nome === REVISAO) fill = C.vermelho;
+      else if (nome === SEM_JUSTIFICATIVA) fill = C.grafiteClaro;
+      else { fill = greenShade(realIdx, totalReal); realIdx += 1; }
+      return {
+        nome, nomeCurto: nome.length > 20 ? nome.slice(0, 18) + '…' : nome,
+        valor, pct: Math.round((valor / total) * 1000) / 10, cumulativo: Math.round((running / total) * 1000) / 10, fill, destaquePareto,
+      };
+    });
+  }, [displayResults]);
+
+  const carrierChartData = useMemo(() => {
+    const counts = {};
+    displayResults.forEach((r) => { counts[r.transportadora] = (counts[r.transportadora] || 0) + 1; });
+    const total = displayResults.length || 1;
+    return Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 10)
+      .map(([nome, valor]) => ({ nome, valor, pct: Math.round((valor / total) * 1000) / 10 }));
+  }, [displayResults]);
+
+  const hasDates = useMemo(() => displayResults.some((r) => r.dtReal || r.dtPrevista), [displayResults]);
+  const timelineChartData = useMemo(() => {
+    if (!hasDates) return [];
+    const buckets = {};
+    displayResults.forEach((r) => {
+      const d = r.dtReal || r.dtPrevista;
+      if (!d) return;
+      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+      if (!buckets[key]) buckets[key] = { mes: key, total: 0, revisao: 0 };
+      buckets[key].total += 1;
+      if (r.categoriaFinal === REVISAO) buckets[key].revisao += 1;
+    });
+    return Object.values(buckets).sort((a, b) => a.mes.localeCompare(b.mes));
+  }, [displayResults, hasDates]);
+
+  const transportadoras = useMemo(() => ['Todas', ...Array.from(new Set(displayResults.map((r) => r.transportadora))).sort((a, b) => a.localeCompare(b, 'pt-BR'))], [displayResults]);
+  const categoriasPresentes = useMemo(() => ['Todas', ...Array.from(new Set(displayResults.map((r) => r.categoriaFinal))).sort((a, b) => a.localeCompare(b, 'pt-BR'))], [displayResults]);
+
+  const filteredSorted = useMemo(() => {
+    const s = normalize(search);
+    let rows = displayResults.filter((r) => {
+      if (fTransportadora !== 'Todas' && r.transportadora !== fTransportadora) return false;
+      if (fCategoria !== 'Todas' && r.categoriaFinal !== fCategoria) return false;
+      if (onlyReview && r.categoriaFinal !== REVISAO) return false;
+      if (r.confiancaPct < minConf || r.confiancaPct > maxConf) return false;
+      if (dateFrom) { const d = r.dtReal || r.dtPrevista; if (!d || d < new Date(dateFrom)) return false; }
+      if (dateTo) { const d = r.dtReal || r.dtPrevista; if (!d || d > new Date(dateTo + 'T23:59:59')) return false; }
+      if (s) { const hay = normalize(`${r.transportadora} ${r.pedido} ${r.justificativaOriginal}`); if (!hay.includes(s)) return false; }
+      return true;
+    });
+    const accessor = {
+      linhaOriginal: (r) => r.linhaOriginal, transportadora: (r) => r.transportadora, categoria: (r) => r.categoriaFinal,
+      confianca: (r) => r.confiancaPct, dataReal: (r) => r.dtReal, dataPrevista: (r) => r.dtPrevista,
+    }[sortBy] || ((r) => r.linhaOriginal);
+    rows = [...rows].sort((a, b) => {
+      const av = accessor(a), bv = accessor(b);
+      let cmp;
+      if (av == null && bv == null) cmp = 0;
+      else if (av == null) cmp = -1;
+      else if (bv == null) cmp = 1;
+      else if (av instanceof Date && bv instanceof Date) cmp = av.getTime() - bv.getTime();
+      else if (typeof av === 'number' && typeof bv === 'number') cmp = av - bv;
+      else cmp = String(av).localeCompare(String(bv), 'pt-BR');
+      return sortDir === 'asc' ? cmp : -cmp;
+    });
+    return rows;
+  }, [displayResults, search, fTransportadora, fCategoria, onlyReview, minConf, maxConf, dateFrom, dateTo, sortBy, sortDir]);
+
+  const totalPages = Math.max(1, Math.ceil(filteredSorted.length / PAGE_SIZE));
+  const pageClamped = Math.min(page, totalPages);
+  const pageRows = filteredSorted.slice((pageClamped - 1) * PAGE_SIZE, pageClamped * PAGE_SIZE);
+  const toggleSort = (field) => { if (sortBy === field) setSortDir((d) => (d === 'asc' ? 'desc' : 'asc')); else { setSortBy(field); setSortDir('asc'); } setPage(1); };
+
+  const downloadBlob = (blob, filename) => {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+
+  const buildExportRows = () => displayResults.map((r) => ({
+    'Aba': r.abaOrigem, 'Linha original': r.linhaOriginal, 'Transportadora': r.transportadora, 'Pedido/NF': r.pedido,
+    'Data prevista': r.dtPrevista ? fmtDate(r.dtPrevista) : '', 'Data real': r.dtReal ? fmtDate(r.dtReal) : '',
+    'Justificativa original': r.justificativaOriginal, 'Categoria sugerida (regra)': r.categoriaPadronizada, 'Categoria final': r.categoriaFinal,
+    'Corrigido manualmente': r.corrigidoManualmente ? 'Sim' : 'Não', 'Confiança (%)': r.confiancaPct, 'Racional': r.racionalFinal,
+    'Validado e concluído': r.validado ? 'Sim' : 'Não', 'Causa secundária mencionada': r.causaSecundaria || '',
+  }));
+
+  const markdownCell = (value) => String(value ?? '').replace(/\|/g, '\\|').replace(/\r?\n/g, ' <br> ');
+  const exportValidationMarkdown = () => {
+    const dataGeracao = new Date().toLocaleString('pt-BR');
+    const linhas = displayResults
+      .filter((r) => r.validado || r.corrigidoManualmente)
+      .map((r) => `| ${markdownCell(r.abaOrigem)} | ${markdownCell(r.linhaOriginal)} | ${markdownCell(r.transportadora)} | ${markdownCell(r.pedido)} | ${markdownCell(r.categoriaPadronizada)} | ${markdownCell(r.categoriaFinal)} | ${r.corrigidoManualmente ? 'Sim' : 'Não'} | ${r.validado ? 'Sim' : 'Não'} | ${r.confiancaPct}% | ${markdownCell(r.justificativaOriginal)} |`)
+      .join('\n');
+    const markdown = `# Pacote de validação para evolução do classificador\n\nGerado em: ${dataGeracao}\n\n## Indicadores de validação\n\n| Métrica | Valor |\n| --- | ---: |\n| Registros analisados | ${validationStats.total} |\n| Registros validados e concluídos | ${validationStats.validado} |\n| Registros pendentes | ${validationStats.pendente} |\n| Taxa de validação | ${validationStats.taxaValidacao}% |\n| Classificações ajustadas | ${validationStats.ajustado} |\n| Taxa de ajuste do modelo | ${validationStats.taxaAjuste}% |\n\n## Registros para aprendizado\n\nInclui linhas validadas e/ou com categoria modificada. Compartilhe este arquivo com a equipe responsável pela evolução das regras.\n\n| Aba | Linha | Transportadora | Pedido/NF | Sugestão do modelo | Categoria final | Ajustado | Validado | Confiança | Justificativa original |\n| --- | ---: | --- | --- | --- | --- | --- | --- | ---: | --- |\n${linhas || '| — | — | — | — | — | — | — | — | — | Nenhum registro validado ou ajustado. |'}\n`;
+    downloadBlob(new Blob(['\uFEFF' + markdown], { type: 'text/markdown;charset=utf-8;' }), `pacote_validacao_ajustes_${new Date().toISOString().slice(0, 10)}.md`);
+  };
+
+  const exportXLSX = () => {
+    const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.json_to_sheet(buildExportRows());
+    ws['!cols'] = [{ wch: 14 }, { wch: 12 }, { wch: 20 }, { wch: 14 }, { wch: 12 }, { wch: 12 }, { wch: 40 }, { wch: 30 }, { wch: 30 }, { wch: 10 }, { wch: 10 }, { wch: 40 }, { wch: 30 }];
+    XLSX.utils.book_append_sheet(wb, ws, 'Classificação');
+    const out = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+    downloadBlob(new Blob([out], { type: 'application/octet-stream' }), 'justificativas_classificadas.xlsx');
+  };
+  const exportCSV = () => {
+    const ws = XLSX.utils.json_to_sheet(buildExportRows());
+    const csv = XLSX.utils.sheet_to_csv(ws);
+    downloadBlob(new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' }), 'justificativas_classificadas.csv');
+  };
+
+  /* ------------------------------------------------------------------ */
+  if (authLoading) {
+    return (
+      <div style={{ minHeight: '100vh', width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', background: C.painel, fontFamily: "'Inter', ui-sans-serif, system-ui, sans-serif" }}>
+        <GlobalStyle />
+        <Loader2 size={26} className="spin" style={{ color: C.verde }} aria-hidden="true" />
+      </div>
+    );
+  }
+  if (!authEmail) {
+    return (
+      <div style={{ minHeight: '100vh', width: '100%', fontFamily: "'Inter', ui-sans-serif, system-ui, sans-serif" }}>
+        <GlobalStyle />
+        <LoginScreen onSubmit={handleLogin} error={loginError} />
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ minHeight: '100vh', width: '100%', background: C.painel, color: C.grafite, fontFamily: "'Inter', ui-sans-serif, system-ui, sans-serif" }}>
+      <GlobalStyle />
+      <Header done={stage === STAGES.DONE} kpis={kpis} onReset={resetAll} authEmail={authEmail} onLogout={handleLogout} />
+
+      <main className="max-w-7xl mx-auto px-4 md:px-8" style={{ paddingTop: 24, paddingBottom: 24 }}>
+        {stage === STAGES.UPLOAD && <UploadZone dragOver={dragOver} setDragOver={setDragOver} onDrop={onDrop} onFile={handleFile} />}
+        {stage === STAGES.ERROR && <ErrorView message={errorMsg} onRetry={resetAll} />}
+        {stage === STAGES.MAPPING && (
+          <MappingReview sheetsConfig={sheetsConfig} fileName={fileName} mappingError={mappingError}
+            onToggleSheet={toggleSheetIncluded} onUpdateMapping={updateSheetMapping} onConfirm={confirmMapping} onCancel={resetAll}
+            useAI={useAI} setUseAI={setUseAI} aiApiKey={aiApiKey} setAiApiKey={setAiApiKey} />
+        )}
+        {stage === STAGES.READING && <ProcessingView step={1} progress={progress} aiProgress={null} onCancel={null} />}
+        {stage === STAGES.CLASSIFYING && <ProcessingView step={2} progress={progress} aiProgress={aiProgress} onCancel={cancelClassification} />}
+
+        {stage === STAGES.DONE && (
+          <div className="fade-up">
+            <StageBreadcrumb />
+            {aiWarning && (
+              <div className="flex items-center" style={{ gap: 8, background: C.amareloTint, border: `1px solid ${C.amarelo}`, borderRadius: 10, padding: '10px 14px', marginBottom: 14 }}>
+                <AlertTriangle size={15} style={{ color: C.amareloTexto, flexShrink: 0 }} aria-hidden="true" />
+                <span style={{ fontSize: 12.5, color: C.amareloTexto, fontWeight: 600 }}>{aiWarning}</span>
+              </div>
+            )}
+            <KpiGrid kpis={kpis} />
+
+            <Panel title="Causas de atraso — análise de Pareto" meta={`${paretoData.length} categorias`} icon={<ClipboardList />} style={{ marginTop: 16 }}>
+              <ParetoChart data={paretoData} />
+              <p style={{ fontSize: 12, color: C.grafiteMedio, marginTop: 12 }}>
+                Barras vermelhas: causas prioritárias com acumulado de até 80%. Barras amarelas: casos em revisão manual. Linha preta: percentual acumulado.
+              </p>
+            </Panel>
+
+            <div className="grid grid-cols-1 lg:grid-cols-2" style={{ gap: 16, marginTop: 16, alignItems: 'start' }}>
+              <Panel title="Ranking por transportadora" meta="top 10" icon={<Truck />}>
+                <CarrierBarChart data={carrierChartData} />
+              </Panel>
+              {hasDates && timelineChartData.length > 1 ? (
+                <Panel title="Linha do tempo de atrasos" meta="por mês" icon={<TrendingUp />}>
+                  <TimelineChart data={timelineChartData} />
+                </Panel>
+              ) : (
+                <Panel title="Linha do tempo de atrasos" meta="por mês" icon={<TrendingUp />}>
+                  <EmptyState text="Sem datas suficientes na planilha para montar a linha do tempo." />
+                </Panel>
+              )}
+            </div>
+
+            <FiltersBar search={search} setSearch={setSearch}
+              fTransportadora={fTransportadora} setFTransportadora={setFTransportadora} transportadoras={transportadoras}
+              fCategoria={fCategoria} setFCategoria={setFCategoria} categoriasPresentes={categoriasPresentes}
+              minConf={minConf} setMinConf={setMinConf} maxConf={maxConf} setMaxConf={setMaxConf}
+              onlyReview={onlyReview} setOnlyReview={setOnlyReview}
+              dateFrom={dateFrom} setDateFrom={setDateFrom} dateTo={dateTo} setDateTo={setDateTo} hasDates={hasDates}
+              resultCount={filteredSorted.length} totalCount={displayResults.length}
+              onExportXLSX={exportXLSX} onExportCSV={exportCSV} />
+            <ValidationProgress stats={validationStats} onExportMarkdown={exportValidationMarkdown} />
+
+            <ResultsTable rows={pageRows} sortBy={sortBy} sortDir={sortDir} onSort={toggleSort} onDraftChange={setDraftCorrection} onApplyStatus={applyDraftCorrection} onToggleValidation={setValidation} />
+            <PaginationBar page={pageClamped} totalPages={totalPages} onPage={setPage} total={filteredSorted.length} pageSize={PAGE_SIZE} />
+          </div>
+        )}
+      </main>
+
+      <footer style={{ textAlign: 'center', fontSize: 11.5, color: C.grafiteClaro, padding: '28px 16px', maxWidth: 720, margin: '0 auto' }}>
+        <p style={{ marginTop: 8 }}>Desenvolvido por Jonas Loureiro Softwares</p>
+      </footer>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Estilos globais próprios (não dependem do compilador Tailwind)     */
+/* ------------------------------------------------------------------ */
+function GlobalStyle() {
+  return (
+    <style>{`
+      @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@500;600&display=swap');
+      * { box-sizing: border-box; }
+      .mono { font-family: ${FONT_MONO}; font-variant-numeric: tabular-nums; }
+      select, button, input { font-family: inherit; }
+      ::-webkit-scrollbar { height: 8px; width: 8px; }
+      ::-webkit-scrollbar-thumb { background: ${C.linha}; border-radius: 8px; }
+      ::-webkit-scrollbar-track { background: transparent; }
+      @keyframes fadeUp { from { opacity: 0; transform: translateY(6px);} to { opacity: 1; transform: translateY(0);} }
+      @keyframes spin { to { transform: rotate(360deg); } }
+      .fade-up { animation: fadeUp .3s ease-out both; }
+      .spin { animation: spin .9s linear infinite; }
+      .focusable:focus-visible { outline: 2px solid ${C.verde}; outline-offset: 2px; }
+      .row-hover:hover { background: ${C.painel}; }
+      .card { background: ${C.fundo}; border: 1px solid ${C.linha}; border-radius: 16px; box-shadow: 0 1px 2px rgba(60,64,67,.08), 0 1px 6px rgba(60,64,67,.08); }
+      .field { font-size: 13.5px; padding: 9px 12px; border: 1px solid ${C.linha}; border-radius: 10px; background: ${C.fundo}; color: ${C.grafite}; }
+      .field::placeholder { color: ${C.grafiteClaro}; }
+      .btn { font-weight: 600; font-size: 13.5px; padding: 10px 18px; border-radius: 999px; cursor: pointer; border: 1px solid transparent; display: inline-flex; align-items: center; gap: 7px; transition: box-shadow .15s ease, background-color .15s ease; }
+      .btn:disabled { opacity: .45; cursor: not-allowed; }
+      .btn-primary { background: ${C.verdeHeader}; color: #fff; box-shadow: 0 1px 2px rgba(60,64,67,.3), 0 1px 3px rgba(60,64,67,.15); }
+      .btn-primary:hover:not(:disabled) { box-shadow: 0 1px 3px rgba(60,64,67,.3), 0 4px 8px rgba(60,64,67,.2); }
+      .btn-outline { background: transparent; border-color: ${C.linha}; color: ${C.grafite}; }
+      .btn-outline:hover:not(:disabled) { background: ${C.painel}; }
+      .btn-ghost-dark { background: transparent; border-color: rgba(255,255,255,0.55); color: #fff; }
+      .btn-ghost-dark:hover { background: rgba(255,255,255,0.14); }
+      .btn-danger-outline { background: transparent; border-color: ${C.vermelho}; color: ${C.vermelhoTexto}; }
+      .btn-danger-outline:hover { background: ${C.vermelhoTint}; }
+      .icon-chip { border-radius: 12px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+    `}</style>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Sub-componentes                                                     */
+/* ------------------------------------------------------------------ */
+
+function LoginScreen({ onSubmit, error }) {
+  const [email, setEmail] = useState('');
+  const handleSubmit = (e) => { e.preventDefault(); onSubmit(email); };
+  return (
+    <div
+      style={{
+        minHeight: '100vh', width: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: 20,
+        backgroundImage: `radial-gradient(circle at 18% 15%, rgba(249,171,0,0.30), transparent 42%), radial-gradient(circle at 85% 85%, rgba(255,255,255,0.12), transparent 40%), linear-gradient(135deg, ${C.verdeHeader} 0%, ${C.verdeSinal} 38%, ${C.painel} 78%)`,
+      }}
+    >
+      <div
+        className="fade-up"
+        style={{
+          width: '100%', maxWidth: 420, background: '#fff', borderRadius: 24,
+          border: `2px solid rgba(255,255,255,0.7)`,
+          boxShadow: '0 28px 60px rgba(6,60,32,0.35), 0 10px 26px rgba(0,0,0,0.16)',
+          overflow: 'hidden',
+        }}
+      >
+        <div style={{ height: 7, background: `linear-gradient(90deg, ${C.verdeHeader}, ${C.verdeSinal} 55%, ${C.amarelo})` }} />
+        <div style={{ padding: '44px 36px 38px', textAlign: 'center' }}>
+          <div style={{ width: 88, height: 88, borderRadius: 18, margin: '0 auto 22px', padding: 5, background: '#FFFFFF', boxShadow: '0 10px 22px rgba(11,110,58,.28)' }}>
+            <CausaAiLogo size={78} />
+          </div>
+          <h1 style={{ fontWeight: 700, fontSize: 21, color: C.grafite, marginBottom: 4 }}>CausaAI - OPTT</h1>
+          <p style={{ fontSize: 13.5, color: C.grafiteMedio, marginBottom: 26 }}>Informe seu e-mail</p>
+          <form onSubmit={handleSubmit} style={{ textAlign: 'left' }}>
+            <input
+              id="login-email" type="email" value={email} onChange={(e) => setEmail(e.target.value)}
+              placeholder="Insira seu email aqui" autoFocus autoComplete="email"
+              className="field focusable" style={{ width: '100%', marginBottom: error ? 10 : 18 }}
+            />
+            {error && (
+              <div className="flex items-center" style={{ gap: 8, background: C.vermelhoTint, border: `1px solid ${C.vermelho}`, borderRadius: 10, padding: '10px 12px', marginBottom: 18 }}>
+                <AlertTriangle size={15} style={{ color: C.vermelhoTexto, flexShrink: 0 }} aria-hidden="true" />
+                <span style={{ fontSize: 12.5, color: C.vermelhoTexto, fontWeight: 600 }}>{error}</span>
+              </div>
+            )}
+            <button type="submit" className="btn btn-primary focusable" style={{ width: '100%', justifyContent: 'center' }}>Entrar</button>
+          </form>
+        </div>
+      </div>
+      <p style={{ fontSize: 11.5, color: 'rgba(32,33,36,0.55)', marginTop: 22 }}>Desenvolvido por Jonas Loureiro Softwares</p>
+    </div>
+  );
+}
+
+function Header({ done, kpis, onReset, authEmail, onLogout }) {
+  return (
+    <header style={{ background: C.verdeHeader, boxShadow: '0 1px 2px rgba(0,0,0,.15), 0 2px 8px rgba(0,0,0,.12)' }}>
+      <div className="max-w-7xl mx-auto px-4 md:px-8 flex items-center justify-between flex-wrap" style={{ paddingTop: 14, paddingBottom: 14, gap: 12 }}>
+        <div className="flex items-center" style={{ gap: 12 }}>
+          <div className="icon-chip" style={{ width: 42, height: 42, background: '#FFFFFF', borderRadius: 9 }}>
+            <CausaAiLogo size={40} />
+          </div>
+          <div>
+            <h1 style={{ fontWeight: 700, fontSize: 18, color: '#FFFFFF', lineHeight: 1.15 }}>CausaAI - OPTT</h1>
+            <p style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.78)', marginTop: 2 }}>Classificação automática de justificativas de entrega</p>
+          </div>
+        </div>
+        <div className="flex items-center" style={{ gap: 14 }}>
+          {done && (
+            <div className="hidden sm:block" style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.9)' }}>
+              {numFmt.format(kpis.total)} analisadas · {numFmt.format(kpis.revisaoCount)} em revisão
+            </div>
+          )}
+          {done && (
+            <button onClick={onReset} className="btn btn-ghost-dark focusable">
+              <RefreshCw size={13} aria-hidden="true" /> Novo arquivo
+            </button>
+          )}
+          {authEmail && (
+            <div className="flex items-center" style={{ gap: 8 }}>
+              <span className="hidden sm:inline" style={{ fontSize: 12, color: 'rgba(255,255,255,0.82)' }}>{authEmail}</span>
+              <button onClick={onLogout} className="focusable" style={{ fontSize: 12, fontWeight: 600, color: 'rgba(255,255,255,0.82)', background: 'transparent', border: 'none', cursor: 'pointer', textDecoration: 'underline' }}>
+                Sair
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+    </header>
+  );
+}
+
+function StageBreadcrumb() {
+  const steps = ['Leitura', 'Classificação', 'Painel'];
+  return (
+    <div className="hidden sm:flex items-center" style={{ gap: 8, marginBottom: 18 }}>
+      {steps.map((s, i) => (
+        <React.Fragment key={s}>
+          <span style={{ fontSize: 12, fontWeight: 600, color: C.verdeTexto, background: C.verdeTint, borderRadius: 999, padding: '4px 12px' }}>
+            {i + 1}. {s}
+          </span>
+          {i < steps.length - 1 && <span style={{ color: C.grafiteClaro, fontSize: 12 }}>&rarr;</span>}
+        </React.Fragment>
+      ))}
+    </div>
+  );
+}
+
+function UploadZone({ dragOver, setDragOver, onDrop, onFile }) {
+  const inputId = 'upload-xlsx-input';
+  return (
+    <div className="fade-up">
+      {/* O card inteiro é um <label> associado ao input por htmlFor/id — o
+          navegador abre o seletor de arquivo nativamente ao clicar em
+          qualquer ponto dele, sem nenhum .click() disparado via JS. */}
+      <label
+        htmlFor={inputId}
+        onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+        onDragLeave={() => setDragOver(false)}
+        onDrop={onDrop}
+        className="focusable"
+        style={{ position: 'relative', display: 'block', cursor: 'pointer', borderRadius: 16, borderStyle: 'dashed', borderWidth: 2, borderColor: dragOver ? C.verde : C.linha, background: dragOver ? C.verdeTint : C.fundo, padding: '56px 24px', textAlign: 'center' }}
+      >
+        <div className="icon-chip" style={{ width: 64, height: 64, borderRadius: '50%', background: C.verdeTint, margin: '0 auto 18px' }}>
+          <Upload size={27} style={{ color: C.verde }} aria-hidden="true" />
+        </div>
+        <h2 style={{ fontWeight: 700, fontSize: 20, color: C.grafite, marginBottom: 6 }}>
+          Envie a planilha de entregas em atraso
+        </h2>
+        <p style={{ fontSize: 13.5, color: C.grafiteMedio, maxWidth: 420, margin: '0 auto 22px' }}>
+          Arraste um arquivo .xlsx ou .xls aqui, ou clique para selecionar. Tamanho máximo de {MAX_FILE_MB} MB.
+        </p>
+        <span className="btn btn-primary focusable">
+          <FileSpreadsheet size={16} aria-hidden="true" /> Selecionar arquivo
+        </span>
+        <input
+          id={inputId}
+          type="file"
+          accept=".xlsx,.xls"
+          onChange={(e) => onFile(e.target.files && e.target.files[0])}
+          style={{ position: 'absolute', width: 1, height: 1, padding: 0, margin: -1, overflow: 'hidden', clip: 'rect(0,0,0,0)', whiteSpace: 'nowrap', border: 0 }}
+        />
+      </label>
+      <div className="flex items-start card" style={{ gap: 8, marginTop: 14, padding: '13px 16px', fontSize: 12.5, color: C.grafiteMedio }}>
+        <Info size={14} style={{ flexShrink: 0, marginTop: 2, color: C.grafiteMedio }} aria-hidden="true" />
+        <p>As colunas esperadas são Transportadora, Nº do pedido/NF, Data prevista, Data real de entrega e Justificativa — os nomes podem variar, o sistema tenta identificá-las automaticamente e permite ajustar antes de classificar.</p>
+      </div>
+    </div>
+  );
+}
+
+function ErrorView({ message, onRetry }) {
+  return (
+    <div className="fade-up card" style={{ padding: '48px 24px', textAlign: 'center' }}>
+      <div className="icon-chip" style={{ width: 56, height: 56, borderRadius: '50%', background: C.vermelhoTint, margin: '0 auto 16px' }}>
+        <AlertTriangle size={24} style={{ color: C.vermelhoTexto }} aria-hidden="true" />
+      </div>
+      <h2 style={{ fontWeight: 700, fontSize: 18, color: C.grafite, marginBottom: 6 }}>Não foi possível continuar</h2>
+      <p style={{ fontSize: 13.5, color: C.grafiteMedio, maxWidth: 420, margin: '0 auto 20px' }}>{message}</p>
+      <button onClick={onRetry} className="btn btn-primary focusable" style={{ margin: '0 auto' }}>
+        <RefreshCw size={14} aria-hidden="true" /> Tentar novamente
+      </button>
+    </div>
+  );
+}
+
+function MappingReview({ sheetsConfig, fileName, mappingError, onToggleSheet, onUpdateMapping, onConfirm, onCancel, useAI, setUseAI, aiApiKey, setAiApiKey }) {
+  const fields = [['transportadora', 'Transportadora'], ['pedido', 'Pedido / NF'], ['dataPrevista', 'Data prevista'], ['dataReal', 'Data real'], ['justificativa', 'Justificativa']];
+  const includedCount = sheetsConfig.filter((s) => s.included && s.rowCount > 0).length;
+  const totalRows = sheetsConfig.filter((s) => s.included).reduce((a, s) => a + s.rowCount, 0);
+  const [keyDraft, setKeyDraft] = useState(aiApiKey || '');
+  const [showKey, setShowKey] = useState(false);
+
+  return (
+    <div className="fade-up card" style={{ overflow: 'hidden' }}>
+      <div style={{ padding: '20px 22px', borderBottom: `1px solid ${C.linha}` }}>
+        <h2 className="flex items-center" style={{ gap: 8, fontWeight: 700, fontSize: 17, color: C.grafite }}>
+          <FileSpreadsheet size={16} style={{ color: C.verde }} aria-hidden="true" /> Confirme as colunas de {fileName}
+        </h2>
+        <p style={{ fontSize: 12.5, color: C.grafiteMedio, marginTop: 4 }}>Identificamos as colunas automaticamente. Ajuste o que estiver incorreto antes de classificar.</p>
+      </div>
+
+      <div style={{ padding: '4px 22px', maxHeight: '28rem', overflowY: 'auto' }}>
+        {sheetsConfig.map((s) => (
+          <div key={s.name} style={{ padding: '16px 0', borderBottom: `1px solid ${C.linha}` }}>
+            <label className="flex items-center" style={{ gap: 8, marginBottom: 12, cursor: 'pointer' }}>
+              <input type="checkbox" checked={s.included} disabled={s.rowCount === 0} onChange={() => onToggleSheet(s.name)} style={{ width: 16, height: 16, accentColor: C.verde }} />
+              <span style={{ fontSize: 13.5, fontWeight: 600, color: C.grafite }}>{s.name}</span>
+              <span style={{ fontSize: 11, fontWeight: 600, borderRadius: 999, padding: '3px 10px', background: s.rowCount ? C.verdeTint : C.painel, color: s.rowCount ? C.verdeTexto : C.grafiteMedio }}>
+                {s.rowCount ? `${numFmt.format(s.rowCount)} linha(s)` : 'sem dados'}
+              </span>
+            </label>
+            {s.included && s.rowCount > 0 && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-5" style={{ gap: 10, paddingLeft: 24 }}>
+                {fields.map(([field, label]) => (
+                  <div key={field}>
+                    <label style={{ display: 'block', fontSize: 11.5, fontWeight: 600, color: C.grafiteMedio, marginBottom: 4 }}>{label}</label>
+                    <select value={s.mapping[field] || ''} onChange={(e) => onUpdateMapping(s.name, field, e.target.value)}
+                      className="field focusable" style={{ width: '100%' }} aria-label={`Coluna para ${label} na aba ${s.name}`}>
+                      <option value="">(nenhuma)</option>
+                      {s.headers.map((h) => <option key={h} value={h}>{h}</option>)}
+                    </select>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+
+      <div style={{ padding: '16px 22px', borderTop: `1px solid ${C.linha}` }}>
+        <label className="flex items-center" style={{ gap: 8, cursor: 'pointer' }}>
+          <input type="checkbox" checked={useAI} onChange={(e) => setUseAI(e.target.checked)} style={{ width: 16, height: 16, accentColor: C.verde }} />
+          <span style={{ fontSize: 13, fontWeight: 600, color: C.grafite }}>Usar IA para o que as regras não conseguirem classificar (opcional)</span>
+        </label>
+        <p style={{ fontSize: 11.5, color: C.grafiteMedio, marginTop: 4, marginLeft: 24 }}>
+          Revisa o que ficaria em "Revisão manual necessária" e também o que a regra classificou com confiança baixa (abaixo de 85%). Requer sua própria chave de API da Anthropic — custo estimado de poucos centavos de dólar por análise (~US$ 0,08 a cada 96 linhas enviadas à IA).
+        </p>
+        {useAI && IS_FILE_PROTOCOL && (
+          <div className="flex items-start" style={{ gap: 8, marginTop: 10, marginLeft: 24, background: C.amareloTint, border: `1px solid ${C.amarelo}`, borderRadius: 10, padding: '10px 12px' }}>
+            <AlertTriangle size={15} style={{ color: C.amareloTexto, flexShrink: 0, marginTop: 1 }} aria-hidden="true" />
+            <span style={{ fontSize: 12, color: C.amareloTexto }}>
+              Este arquivo está aberto direto do disco (endereço começando com <code className="mono">file://</code>). Navegadores costumam bloquear a chamada à IA nesse modo por segurança (CORS). Se a IA falhar, sirva este HTML por um servidor local — por exemplo, abra uma janela de terminal na pasta do arquivo e rode <code className="mono">python -m http.server 8000</code>, depois acesse <code className="mono">http://localhost:8000</code> no navegador.
+            </span>
+          </div>
+        )}
+        {useAI && (
+          <div className="flex items-center" style={{ gap: 6, marginTop: 10, marginLeft: 24, flexWrap: 'wrap' }}>
+            <input
+              type={showKey ? 'text' : 'password'} value={keyDraft} onChange={(e) => setKeyDraft(e.target.value)} autoComplete="off"
+              placeholder="sk-ant-..." className="field focusable" style={{ flex: '1 1 220px', minWidth: 160 }}
+            />
+            <button type="button" onClick={() => setShowKey((s) => !s)} className="focusable" style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: C.grafiteMedio, display: 'inline-flex' }} aria-label={showKey ? 'Ocultar chave' : 'Mostrar chave'}>
+              {showKey ? <EyeOff size={15} /> : <Eye size={15} />}
+            </button>
+            <button type="button" onClick={() => setAiApiKey(keyDraft.trim())} className="btn btn-outline focusable" style={{ padding: '6px 14px', fontSize: 12 }}>Usar nesta sessão</button>
+            <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener noreferrer" style={{ fontSize: 11.5, color: C.verdeTexto }}>Obter chave ↗</a>
+            {aiApiKey && !keyDraft && <span style={{ fontSize: 11.5, color: C.verdeTexto, fontWeight: 600 }}>Chave ativa somente nesta sessão</span>}
+          </div>
+        )}
+      </div>
+
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between" style={{ gap: 12, padding: '16px 22px', background: C.painel, borderTop: `1px solid ${C.linha}` }}>
+        <div style={{ fontSize: 11.5, color: C.grafiteMedio }}>
+          {includedCount > 0 ? <>≈ {numFmt.format(totalRows)} linha(s) a classificar por regras locais — sem IA, sem token, sem envio de dados para fora do navegador. Correções manuais feitas na tabela são aprendidas e aplicadas automaticamente em execuções futuras.</> : 'Nenhuma aba selecionada.'}
+          {mappingError && <div style={{ marginTop: 4, fontWeight: 600, color: C.vermelhoTexto }}>{mappingError}</div>}
+        </div>
+        <div className="flex items-center" style={{ gap: 8, flexShrink: 0 }}>
+          <button onClick={onCancel} className="btn btn-outline focusable">Cancelar</button>
+          <button onClick={onConfirm} className="btn btn-primary focusable">Confirmar e classificar</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ProcessingView({ step, progress, aiProgress, onCancel }) {
+  const steps = ['Lendo arquivo', 'Classificando justificativas', 'Gerando relatório'];
+  const pct = progress.total ? Math.round((progress.done / progress.total) * 100) : 0;
+  const aiPct = aiProgress && aiProgress.total ? Math.round((aiProgress.done / aiProgress.total) * 100) : 0;
+  return (
+    <div className="fade-up card" style={{ padding: '52px 24px' }}>
+      <div className="flex items-center justify-center flex-wrap" style={{ marginBottom: 32 }}>
+        {steps.map((s, i) => {
+          const idx = i + 1, active = idx === step, done = idx < step;
+          return (
+            <React.Fragment key={s}>
+              <div className="flex flex-col items-center" style={{ width: 150, textAlign: 'center' }}>
+                <div className="mono flex items-center justify-center" style={{ width: 36, height: 36, borderRadius: '50%', fontSize: 13, fontWeight: 700, marginBottom: 8, background: done || active ? C.verde : C.painel, color: done || active ? '#fff' : C.grafiteMedio }}>
+                  {active ? <Loader2 size={15} className="spin" aria-hidden="true" /> : idx}
+                </div>
+                <span style={{ fontSize: 12, color: active ? C.grafite : C.grafiteMedio, fontWeight: active ? 600 : 400 }}>{s}</span>
+              </div>
+              {i < steps.length - 1 && <div style={{ width: 36, height: 2, borderRadius: 2, background: idx < step ? C.verde : C.linha, marginBottom: 24 }} />}
+            </React.Fragment>
+          );
+        })}
+      </div>
+      {step === 2 && (
+        <div style={{ maxWidth: 420, margin: '0 auto' }}>
+          <div style={{ width: '100%', height: 8, background: C.painel, borderRadius: 999, overflow: 'hidden' }}>
+            <div style={{ height: '100%', width: `${pct}%`, background: C.verde, borderRadius: 999, transition: 'width .2s ease' }} />
+          </div>
+          <p className="mono" style={{ textAlign: 'center', fontSize: 12.5, color: C.grafiteMedio, marginTop: 10 }}>
+            {numFmt.format(progress.done)} de {numFmt.format(progress.total)} justificativas · {pct}%
+          </p>
+          {aiProgress && (
+            <div style={{ marginTop: 18, paddingTop: 16, borderTop: `1px solid ${C.linha}` }}>
+              <div className="flex items-center" style={{ gap: 6, justifyContent: 'center', marginBottom: 8 }}>
+                <Loader2 size={13} className="spin" style={{ color: C.amareloLinha }} aria-hidden="true" />
+                <span style={{ fontSize: 12, fontWeight: 600, color: C.amareloLinha }}>Refinando com IA</span>
+              </div>
+              <div style={{ width: '100%', height: 6, background: C.painel, borderRadius: 999, overflow: 'hidden' }}>
+                <div style={{ height: '100%', width: `${aiPct}%`, background: C.amareloLinha, borderRadius: 999, transition: 'width .2s ease' }} />
+              </div>
+              <p className="mono" style={{ textAlign: 'center', fontSize: 11.5, color: C.grafiteMedio, marginTop: 8 }}>
+                {numFmt.format(aiProgress.done)} de {numFmt.format(aiProgress.total)} itens revisados pela IA
+              </p>
+            </div>
+          )}
+          {onCancel && (
+            <div className="flex justify-center" style={{ marginTop: 16 }}>
+              <button onClick={onCancel} className="btn btn-danger-outline focusable">Cancelar processamento</button>
+            </div>
+          )}
+        </div>
+      )}
+      {step === 1 && <p style={{ textAlign: 'center', fontSize: 13.5, color: C.grafiteMedio }}>Lendo e validando o arquivo…</p>}
+    </div>
+  );
+}
+
+function KpiCard({ icon, tint, iconColor, label, value, sub }) {
+  return (
+    <div className="card flex items-center" style={{ padding: '14px 16px', gap: 13 }}>
+      <div className="icon-chip" style={{ width: 42, height: 42, background: tint, flexShrink: 0 }}>
+        {React.cloneElement(icon, { size: 19, color: iconColor, 'aria-hidden': 'true' })}
+      </div>
+      <div style={{ minWidth: 0 }}>
+        <div className="mono" style={{ fontSize: 21, fontWeight: 700, color: C.grafite, lineHeight: 1.15 }}>{value}</div>
+        <div style={{ fontSize: 12.5, fontWeight: 600, color: C.grafite, marginTop: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{label}</div>
+        <div style={{ fontSize: 11.5, color: C.grafiteMedio, marginTop: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{sub}</div>
+      </div>
+    </div>
+  );
+}
+
+function KpiGrid({ kpis }) {
+  return (
+    <div className="grid grid-cols-2 lg:grid-cols-4" style={{ gap: 12 }}>
+      <KpiCard icon={<Package />} tint={C.verdeTint} iconColor={C.verdeTexto} label="Entregas analisadas" value={numFmt.format(kpis.total)} sub="total no arquivo" />
+      <KpiCard icon={<CheckCircle2 />} tint={C.verdeTint} iconColor={C.verdeTexto} label="Classificado automaticamente" value={`${kpis.pctClassificado}%`} sub="pelas regras" />
+      <KpiCard icon={<AlertTriangle />} tint={C.vermelhoTint} iconColor={C.vermelhoTexto} label="Em revisão manual" value={`${kpis.pctRevisao}%`} sub={`${numFmt.format(kpis.revisaoCount)} caso(s)`} />
+      <KpiCard icon={<TrendingUp />} tint={C.amareloTint} iconColor={C.amareloTexto} label="Categoria mais frequente" value={kpis.topCount ? numFmt.format(kpis.topCount) : '—'} sub={kpis.topCat} />
+    </div>
+  );
+}
+
+function ValidationProgress({ stats, onExportMarkdown }) {
+  const cards = [
+    { label: 'Concluídos', value: numFmt.format(stats.validado), detail: `de ${numFmt.format(stats.total)} registros`, tint: C.verdeTint, color: C.verdeTexto },
+    { label: 'Taxa de validação', value: `${stats.taxaValidacao}%`, detail: 'marcados como concluídos', tint: '#EAF4FF', color: '#185FA5' },
+    { label: 'Ajustes do modelo', value: numFmt.format(stats.ajustado), detail: `${stats.taxaAjuste}% das classificações`, tint: C.amareloTint, color: C.amareloTexto },
+    { label: 'Pendentes', value: numFmt.format(stats.pendente), detail: 'ainda precisam de validação', tint: C.painel, color: C.grafiteMedio },
+  ];
+  return (
+    <div className="card" style={{ marginTop: 16, overflow: 'hidden', border: `1px solid ${C.verde}` }}>
+      <div className="flex flex-wrap items-center justify-between" style={{ gap: 12, padding: '14px 16px', borderBottom: `1px solid ${C.linha}`, background: 'linear-gradient(90deg, #F3FFF7 0%, #FFFFFF 65%)' }}>
+        <div className="flex items-center" style={{ gap: 10 }}>
+          <div className="icon-chip" style={{ width: 34, height: 34, background: C.verdeTint }}><CheckCircle2 size={17} color={C.verdeTexto} aria-hidden="true" /></div>
+          <div>
+            <h3 style={{ fontSize: 14.5, fontWeight: 700, color: C.grafite }}>Validação e evolução do modelo</h3>
+            <p style={{ fontSize: 11.5, color: C.grafiteMedio, marginTop: 2 }}>Escolha o motivo, confirme em “Atualizar status” e marque a linha revisada como concluída.</p>
+          </div>
+        </div>
+        <button onClick={onExportMarkdown} className="btn btn-primary focusable" title="Baixar pacote de validação para compartilhar e evoluir o classificador"><Download size={14} aria-hidden="true" /> Salvar ajustes (.md)</button>
+      </div>
+      <div style={{ padding: 16 }}>
+        <div className="grid grid-cols-2 lg:grid-cols-4" style={{ gap: 10 }}>
+          {cards.map((card) => (
+            <div key={card.label} style={{ background: card.tint, borderRadius: 10, padding: '11px 12px' }}>
+              <div className="mono" style={{ fontSize: 20, fontWeight: 700, color: card.color }}>{card.value}</div>
+              <div style={{ fontSize: 12, fontWeight: 700, color: C.grafite, marginTop: 2 }}>{card.label}</div>
+              <div style={{ fontSize: 10.5, color: C.grafiteMedio, marginTop: 2 }}>{card.detail}</div>
+            </div>
+          ))}
+        </div>
+        <div style={{ height: 10, borderRadius: 999, background: C.painel, overflow: 'hidden', marginTop: 14 }} aria-label={`${stats.taxaValidacao}% da validação concluída`}>
+          <div style={{ width: `${stats.taxaValidacao}%`, height: '100%', borderRadius: 999, background: `linear-gradient(90deg, ${C.verde}, ${C.amarelo})`, transition: 'width .35s ease' }} />
+        </div>
+        <div className="flex flex-wrap items-center justify-between" style={{ gap: 8, marginTop: 8 }}>
+          <span style={{ fontSize: 11.5, color: C.grafiteMedio }}>Andamento: <strong style={{ color: C.verdeTexto }}>{stats.taxaValidacao}% concluído</strong></span>
+          <span style={{ fontSize: 11.5, color: C.grafiteMedio }}>O arquivo inclui indicadores e as linhas validadas ou ajustadas.</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Panel({ title, meta, icon, children, style }) {
+  return (
+    <div className="card" style={{ overflow: 'hidden', ...style }}>
+      <div className="flex items-center justify-between" style={{ padding: '13px 16px', borderBottom: `1px solid ${C.linha}` }}>
+        <div className="flex items-center" style={{ gap: 10 }}>
+          {icon && (
+            <div className="icon-chip" style={{ width: 30, height: 30, background: C.verdeTint }}>
+              {React.cloneElement(icon, { size: 15, color: C.verdeTexto, 'aria-hidden': 'true' })}
+            </div>
+          )}
+          <h3 style={{ fontSize: 14.5, fontWeight: 700, color: C.grafite }}>{title}</h3>
+        </div>
+        {meta && <span className="mono" style={{ fontSize: 11, color: C.grafiteMedio, background: C.painel, borderRadius: 999, padding: '3px 10px' }}>{meta}</span>}
+      </div>
+      <div style={{ padding: 16 }}>{children}</div>
+    </div>
+  );
+}
+
+function EmptyState({ text }) {
+  return <div style={{ height: 160, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 13, color: C.grafiteMedio, textAlign: 'center' }}>{text}</div>;
+}
+
+function ParetoTooltip({ active, payload }) {
+  if (!active || !payload || !payload.length) return null;
+  const d = payload[0].payload;
+  return (
+    <div style={{ background: C.fundo, border: `1px solid ${C.linha}`, borderRadius: 10, boxShadow: '0 2px 10px rgba(60,64,67,.18)', padding: '10px 12px', fontSize: 11.5, maxWidth: 240 }}>
+      <div style={{ fontWeight: 700, color: C.grafite, marginBottom: 5 }}>{d.nome}</div>
+      <div className="mono" style={{ color: C.grafiteMedio }}>Casos: {numFmt.format(d.valor)} ({d.pct}%)</div>
+      <div className="mono" style={{ color: C.grafite }}>Acumulado: {d.cumulativo}%</div>
+      <div style={{ marginTop: 5, fontWeight: 700, color: d.nome === REVISAO ? C.amareloTexto : d.destaquePareto ? C.vermelhoTexto : C.grafiteMedio }}>{d.nome === REVISAO ? 'Revisão manual' : d.destaquePareto ? 'Causa prioritária (até 80%)' : 'Fora da faixa prioritária'}</div>
+    </div>
+  );
+}
+
+function ParetoChart({ data }) {
+  if (!data.length) return <EmptyState text="Sem dados suficientes para exibir este gráfico." />;
+  const CategoryTick = ({ x, y, payload }) => {
+    const maxChars = 18;
+    const lines = [];
+    let line = '';
+    String(payload.value || '').split(/\s+/).forEach((word) => {
+      const next = line ? `${line} ${word}` : word;
+      if (line && next.length > maxChars) { lines.push(line); line = word; }
+      else line = next;
+    });
+    if (line) lines.push(line);
+    return (
+      <text x={x} y={y + 12} textAnchor="middle" fontSize={10} fill={C.grafiteMedio} style={{ fontFamily: "'Inter', ui-sans-serif, system-ui, sans-serif" }}>
+        {lines.slice(0, 4).map((item, index) => <tspan key={index} x={x} dy={index === 0 ? 0 : 12}>{item}</tspan>)}
+      </text>
+    );
+  };
+
+  const BarLabel = (props) => {
+    const { x, y, width, index } = props;
+    const d = data[index];
+    if (!d) return null;
+    const cx = x + width / 2;
+    return (
+      <g>
+        <text x={cx} y={y - 15} textAnchor="middle" fontSize={11} fontWeight={700} fill={C.grafite} style={{ fontFamily: FONT_MONO }}>{numFmt.format(d.valor)}</text>
+        <text x={cx} y={y - 3} textAnchor="middle" fontSize={9.5} fill={C.grafiteMedio} style={{ fontFamily: FONT_MONO }}>{d.pct}%</text>
+      </g>
+    );
+  };
+
+  const ParetoLegend = () => (
+    <div className="flex flex-wrap items-center justify-center" style={{ gap: '8px 16px', fontSize: 11.5, color: C.grafiteMedio, paddingTop: 1 }}>
+      <span className="flex items-center" style={{ gap: 5 }}><i aria-hidden="true" style={{ width: 12, height: 12, borderRadius: 999, background: C.vermelho, display: 'inline-block' }} />Categorias até 80%</span>
+      <span className="flex items-center" style={{ gap: 5 }}><i aria-hidden="true" style={{ width: 12, height: 12, borderRadius: 999, background: C.amarelo, display: 'inline-block' }} />Revisão manual</span>
+      <span className="flex items-center" style={{ gap: 5 }}><i aria-hidden="true" style={{ width: 12, height: 12, borderRadius: 999, background: C.verdeSinal, display: 'inline-block' }} />Demais categorias</span>
+      <span className="flex items-center" style={{ gap: 5 }}><i aria-hidden="true" style={{ width: 16, height: 2, borderRadius: 999, background: C.grafite, display: 'inline-block' }} />% acumulado</span>
+    </div>
+  );
+
+  return (
+    <div style={{ background: C.painel, borderRadius: 12, padding: '12px 6px 0', overflow: 'hidden' }}>
+      <ResponsiveContainer width="100%" height={286}>
+        <ComposedChart data={data} margin={{ top: 16, right: 48, bottom: 0, left: 4 }}>
+          <CartesianGrid stroke={C.linha} strokeDasharray="3 3" vertical={false} />
+          <XAxis dataKey="nome" tick={<CategoryTick />} interval={0} height={62} axisLine={false} tickLine={false} />
+          <YAxis yAxisId="left" tick={{ fontSize: 11, fill: C.grafiteMedio }} allowDecimals={false} axisLine={false} tickLine={false} />
+          <YAxis yAxisId="right" orientation="right" width={48} domain={[0, 100]} tickFormatter={(v) => `${v}%`} tick={{ fontSize: 11, fill: C.grafite }} axisLine={false} tickLine={false} />
+          <Tooltip content={<ParetoTooltip />} cursor={{ fill: 'rgba(32,33,36,0.04)' }} />
+          <ReferenceLine yAxisId="right" y={80} stroke={C.grafiteClaro} strokeDasharray="4 3" label={{ value: '80%', position: 'right', fontSize: 10, fill: C.grafiteMedio }} />
+          <Legend verticalAlign="top" height={30} content={<ParetoLegend />} />
+          <Bar yAxisId="left" dataKey="valor" name="Casos" maxBarSize={64} radius={[6, 6, 0, 0]} fill={C.verdeSinal}>
+            {data.map((d, i) => <Cell key={i} fill={d.nome === REVISAO ? C.amarelo : d.destaquePareto ? C.vermelho : d.fill} />)}
+            <LabelList content={BarLabel} />
+          </Bar>
+          <Line yAxisId="right" type="monotone" dataKey="cumulativo" name="% acumulado" stroke={C.grafite} strokeWidth={2.5} dot={{ r: 3.5, fill: C.grafite, strokeWidth: 0 }} />
+        </ComposedChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+function CarrierBarChart({ data }) {
+  if (!data.length) return <EmptyState text="Sem dados suficientes para exibir este gráfico." />;
+  const CarrierLabel = (props) => {
+    const { x, y, width, height, index } = props;
+    const d = data[index];
+    if (!d) return null;
+    return <text x={x + width + 8} y={y + height / 2} dy={4} fontSize={10.5} fill={C.grafiteMedio} style={{ fontFamily: FONT_MONO }}>{numFmt.format(d.valor)} · {d.pct}%</text>;
+  };
+  return (
+    <ResponsiveContainer width="100%" height={Math.max(200, data.length * 30)}>
+      <BarChart data={data} layout="vertical" margin={{ left: 4, right: 60, top: 4, bottom: 4 }}>
+        <CartesianGrid stroke={C.linha} strokeDasharray="3 3" horizontal={false} />
+        <XAxis type="number" tick={{ fontSize: 11, fill: C.grafiteMedio }} allowDecimals={false} axisLine={false} tickLine={false} />
+        <YAxis type="category" dataKey="nome" width={128} tick={{ fontSize: 10.5, fill: C.grafite }} interval={0} axisLine={false} tickLine={false} />
+        <Tooltip formatter={(v, n, p) => [`${numFmt.format(v)} (${p.payload.pct}%)`, 'Entregas em atraso']} contentStyle={{ fontSize: 12, borderRadius: 10, border: `1px solid ${C.linha}` }} cursor={{ fill: 'rgba(32,33,36,0.04)' }} />
+        <Bar dataKey="valor" barSize={16} radius={[0, 8, 8, 0]} fill={C.verdeSinal}>
+          <LabelList content={CarrierLabel} />
+        </Bar>
+      </BarChart>
+    </ResponsiveContainer>
+  );
+}
+
+function TimelineChart({ data }) {
+  return (
+    <ResponsiveContainer width="100%" height={Math.max(200, Math.min(260, data.length * 40))}>
+      <LineChart data={data} margin={{ left: 0, right: 16, top: 8, bottom: 4 }}>
+        <CartesianGrid stroke={C.linha} strokeDasharray="3 3" />
+        <XAxis dataKey="mes" tick={{ fontSize: 11, fill: C.grafiteMedio }} axisLine={false} tickLine={false} />
+        <YAxis tick={{ fontSize: 11, fill: C.grafiteMedio }} allowDecimals={false} axisLine={false} tickLine={false} />
+        <Tooltip contentStyle={{ fontSize: 12, borderRadius: 10, border: `1px solid ${C.linha}` }} />
+        <Legend wrapperStyle={{ fontSize: 11.5 }} iconType="circle" />
+        <Line type="monotone" dataKey="total" name="Total de atrasos" stroke={C.verde} strokeWidth={2.5} dot={{ r: 3 }} />
+        <Line type="monotone" dataKey="revisao" name="Em revisão manual" stroke={C.vermelho} strokeWidth={2} strokeDasharray="4 3" dot={{ r: 2.5 }} />
+      </LineChart>
+    </ResponsiveContainer>
+  );
+}
+
+function FiltersBar(props) {
+  const { search, setSearch, fTransportadora, setFTransportadora, transportadoras, fCategoria, setFCategoria, categoriasPresentes,
+    minConf, setMinConf, maxConf, setMaxConf, onlyReview, setOnlyReview, dateFrom, setDateFrom, dateTo, setDateTo, hasDates,
+    resultCount, totalCount, onExportXLSX, onExportCSV } = props;
+  return (
+    <div className="card" style={{ marginTop: 16, overflow: 'hidden' }}>
+      <div className="flex items-center" style={{ gap: 8, padding: '13px 16px', borderBottom: `1px solid ${C.linha}` }}>
+        <Filter size={15} style={{ color: C.verde }} aria-hidden="true" />
+        <h3 style={{ fontSize: 14, fontWeight: 700, color: C.grafite }}>Filtrar resultados</h3>
+        <span className="mono" style={{ fontSize: 11, color: C.grafiteMedio, marginLeft: 'auto', background: C.painel, borderRadius: 999, padding: '3px 10px' }}>{numFmt.format(resultCount)} de {numFmt.format(totalCount)}</span>
+      </div>
+      <div style={{ padding: 16 }}>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4" style={{ gap: 10 }}>
+          <div className="lg:col-span-2" style={{ position: 'relative' }}>
+            <Search size={13} style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', color: C.grafiteMedio }} aria-hidden="true" />
+            <input type="text" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Buscar por transportadora, pedido ou texto da justificativa" aria-label="Buscar nos resultados"
+              className="field focusable" style={{ width: '100%', paddingLeft: 32 }} />
+          </div>
+          <select aria-label="Filtrar por transportadora" value={fTransportadora} onChange={(e) => setFTransportadora(e.target.value)} className="field focusable">
+            {transportadoras.map((t) => <option key={t} value={t}>{t === 'Todas' ? 'Todas as transportadoras' : t}</option>)}
+          </select>
+          <select aria-label="Filtrar por categoria" value={fCategoria} onChange={(e) => setFCategoria(e.target.value)} className="field focusable">
+            {categoriasPresentes.map((c) => <option key={c} value={c}>{c === 'Todas' ? 'Todas as categorias' : c}</option>)}
+          </select>
+        </div>
+        <div className="flex flex-wrap items-end" style={{ gap: 16, marginTop: 12 }}>
+          <div>
+            <label style={{ display: 'block', fontSize: 11.5, fontWeight: 600, color: C.grafiteMedio, marginBottom: 4 }}>Confiança mín. (%)</label>
+            <input type="number" min={0} max={100} value={minConf} onChange={(e) => setMinConf(Math.max(0, Math.min(100, Number(e.target.value) || 0)))} className="field focusable" style={{ width: 72 }} />
+          </div>
+          <div>
+            <label style={{ display: 'block', fontSize: 11.5, fontWeight: 600, color: C.grafiteMedio, marginBottom: 4 }}>Confiança máx. (%)</label>
+            <input type="number" min={0} max={100} value={maxConf} onChange={(e) => setMaxConf(Math.max(0, Math.min(100, Number(e.target.value) || 0)))} className="field focusable" style={{ width: 72 }} />
+          </div>
+          {hasDates && (
+            <>
+              <div>
+                <label style={{ display: 'block', fontSize: 11.5, fontWeight: 600, color: C.grafiteMedio, marginBottom: 4 }}>Período de</label>
+                <input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} className="field focusable" />
+              </div>
+              <div>
+                <label style={{ display: 'block', fontSize: 11.5, fontWeight: 600, color: C.grafiteMedio, marginBottom: 4 }}>até</label>
+                <input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} className="field focusable" />
+              </div>
+            </>
+          )}
+          <label className="flex items-center" style={{ gap: 7, fontSize: 13, cursor: 'pointer', paddingBottom: 8, color: C.grafite }}>
+            <input type="checkbox" checked={onlyReview} onChange={(e) => setOnlyReview(e.target.checked)} style={{ width: 16, height: 16, accentColor: C.vermelho }} />
+            Somente revisão manual
+          </label>
+          <div className="flex items-center" style={{ gap: 8, marginLeft: 'auto' }}>
+            <button onClick={onExportCSV} className="btn btn-outline focusable"><Download size={13} aria-hidden="true" /> CSV</button>
+            <button onClick={onExportXLSX} className="btn btn-primary focusable"><Download size={13} aria-hidden="true" /> Exportar XLSX</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SortHeader({ label, field, sortBy, sortDir, onSort }) {
+  const active = sortBy === field;
+  return (
+    <th scope="col" style={{ textAlign: 'left', padding: '12px 14px' }}>
+      <button onClick={() => onSort(field)} className="focusable" style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 12, fontWeight: 600, color: active ? C.verdeTexto : C.grafiteMedio, background: 'transparent', border: 'none', cursor: 'pointer', padding: 0 }}>
+        {label}
+        {active ? (sortDir === 'asc' ? <ChevronUp size={11} aria-hidden="true" /> : <ChevronDown size={11} aria-hidden="true" />) : <ArrowUpDown size={10} style={{ opacity: 0.5 }} aria-hidden="true" />}
+      </button>
+    </th>
+  );
+}
+
+function CategorySelect({ row, onDraftChange, onApplyStatus }) {
+  const current = row.categoriaSelecionada || row.categoriaFinal;
+  const isReview = current === REVISAO;
+  const isEmpty = current === SEM_JUSTIFICATIVA;
+  const edited = row.corrigidoManualmente;
+  const pending = Boolean(row.categoriaSelecionada) && row.categoriaSelecionada !== row.categoriaFinal;
+  const bg = pending || edited ? C.amareloTint : isReview ? C.vermelhoTint : isEmpty ? C.painel : C.verdeTint;
+  const border = pending || edited ? C.amarelo : isReview ? C.vermelho : isEmpty ? C.linha : C.verde;
+  const text = pending || edited ? C.amareloTexto : isReview ? C.vermelhoTexto : isEmpty ? C.grafiteMedio : C.verdeTexto;
+  const options = [...CATEGORIES, REVISAO, SEM_JUSTIFICATIVA];
+  return (
+    <div className="flex flex-col items-start" style={{ gap: 5 }}>
+      <select value={current} onChange={(e) => onDraftChange(row.uid, e.target.value)}
+        title={`Sugestão da regra: ${row.categoriaPadronizada}${row.racionalIA ? ' — ' + row.racionalIA : ''}`}
+        aria-label={`Selecione o motivo da entrega, linha ${row.linhaOriginal}`} className="focusable"
+        style={{ fontSize: 12, fontWeight: 600, padding: '6px 12px', borderRadius: 999, border: `1px solid ${border}`, background: bg, color: text, maxWidth: '15rem', cursor: 'pointer' }}>
+        {options.map((c) => <option key={c} value={c}>{c}</option>)}
+      </select>
+      {pending ? (
+        <div className="flex items-center" style={{ gap: 6 }}>
+          <span style={{ fontSize: 10.5, fontWeight: 700, color: C.amareloTexto }}>Alteração pendente</span>
+          <button onClick={() => onApplyStatus(row.uid)} className="focusable" style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '5px 9px', borderRadius: 7, border: `1px solid ${C.verde}`, background: C.verde, color: '#fff', fontSize: 10.5, fontWeight: 700, cursor: 'pointer' }}>
+            <RefreshCw size={12} aria-hidden="true" /> Atualizar status
+          </button>
+        </div>
+      ) : edited && (
+        <button onClick={() => onDraftChange(row.uid, row.categoriaPadronizada)} title="Preparar retorno para a sugestão da regra" className="focusable"
+          style={{ color: C.grafiteMedio, padding: 0, background: 'transparent', border: 'none', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 10.5, fontWeight: 600 }}>
+          <RotateCcw size={13} aria-hidden="true" /> Restaurar sugestão
+        </button>
+      )}
+    </div>
+  );
+}
+
+function ConfidenceBadge({ value }) {
+  const tone = value >= 80 ? { bg: C.verdeTint, fg: C.verdeTexto, label: 'Alta' } : value >= 60 ? { bg: C.painel, fg: C.grafiteMedio, label: 'Média' } : { bg: C.vermelhoTint, fg: C.vermelhoTexto, label: 'Baixa' };
+  return <span className="mono" title={`Confiança: ${tone.label.toLowerCase()}`} style={{ fontSize: 11, fontWeight: 700, padding: '4px 10px', borderRadius: 999, background: tone.bg, color: tone.fg, display: 'inline-block' }}>{value}%</span>;
+}
+
+function ResultsTable({ rows, sortBy, sortDir, onSort, onDraftChange, onApplyStatus, onToggleValidation }) {
+  return (
+    <div className="card" style={{ marginTop: 16, overflow: 'hidden' }}>
+      <div style={{ overflowX: 'auto' }}>
+        <table style={{ width: '100%', fontSize: 13, borderCollapse: 'collapse' }}>
+          <thead style={{ background: C.painel, borderBottom: `1px solid ${C.linha}` }}>
+            <tr>
+              <SortHeader label="Linha" field="linhaOriginal" sortBy={sortBy} sortDir={sortDir} onSort={onSort} />
+              <SortHeader label="Transportadora" field="transportadora" sortBy={sortBy} sortDir={sortDir} onSort={onSort} />
+              <th scope="col" style={{ textAlign: 'left', padding: '12px 14px', fontSize: 12, fontWeight: 600, color: C.grafiteMedio }}>Pedido/NF</th>
+              <SortHeader label="Data real" field="dataReal" sortBy={sortBy} sortDir={sortDir} onSort={onSort} />
+              <th scope="col" style={{ textAlign: 'left', padding: '12px 14px', fontSize: 12, fontWeight: 600, color: C.grafiteMedio }}>Justificativa original</th>
+              <SortHeader label="Motivo / categoria" field="categoria" sortBy={sortBy} sortDir={sortDir} onSort={onSort} />
+              <SortHeader label="Confiança" field="confianca" sortBy={sortBy} sortDir={sortDir} onSort={onSort} />
+              <th scope="col" style={{ textAlign: 'left', padding: '12px 14px', fontSize: 12, fontWeight: 600, color: C.grafiteMedio }}>Validação</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.length === 0 && (
+              <tr><td colSpan={8} style={{ textAlign: 'center', padding: '40px 0', fontSize: 13, color: C.grafiteMedio }}>Nenhuma entrega corresponde aos filtros selecionados.</td></tr>
+            )}
+            {rows.map((r) => {
+              const isReview = r.categoriaFinal === REVISAO;
+              return (
+                <tr key={r.uid} className="row-hover" style={{ borderTop: `1px solid ${C.linha}`, borderLeft: isReview ? `3px solid ${C.vermelho}` : '3px solid transparent', background: isReview ? '#FEF7F6' : 'transparent' }}>
+                  <td className="mono" style={{ padding: '10px 14px', fontSize: 11.5, color: C.grafiteMedio, verticalAlign: 'top', whiteSpace: 'nowrap' }}>{r.abaOrigem} · {r.linhaOriginal}</td>
+                  <td style={{ padding: '10px 14px', color: C.grafite, verticalAlign: 'top' }}>{r.transportadora}</td>
+                  <td className="mono" style={{ padding: '10px 14px', fontSize: 11.5, color: C.grafiteMedio, verticalAlign: 'top', whiteSpace: 'nowrap' }}>{r.pedido || '—'}</td>
+                  <td className="mono" style={{ padding: '10px 14px', fontSize: 11.5, color: C.grafiteMedio, verticalAlign: 'top', whiteSpace: 'nowrap' }}>{fmtDate(r.dtReal || r.dtPrevista)}</td>
+                  <td style={{ padding: '10px 14px', verticalAlign: 'top', maxWidth: '20rem' }}>
+                    <div className="flex items-start" style={{ gap: 6 }}>
+                      {isReview && <AlertTriangle size={13} style={{ flexShrink: 0, marginTop: 2, color: C.vermelho }} aria-hidden="true" />}
+                      <span title={r.justificativaOriginal || '(vazio)'} style={{ color: C.grafite, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
+                        {r.justificativaOriginal || <em style={{ color: C.grafiteMedio }}>(sem texto)</em>}
+                      </span>
+                    </div>
+                    {isReview && <span style={{ fontSize: 10.5, fontWeight: 700, color: C.vermelhoTexto }}>Revisão manual</span>}
+                  </td>
+                  <td style={{ padding: '10px 14px', verticalAlign: 'top' }}><CategorySelect row={r} onDraftChange={onDraftChange} onApplyStatus={onApplyStatus} /></td>
+                  <td style={{ padding: '10px 14px', verticalAlign: 'top' }}><ConfidenceBadge value={r.confiancaPct} /></td>
+                  <td style={{ padding: '10px 14px', verticalAlign: 'top', minWidth: 140 }}>
+                    <label className="flex items-center" style={{ gap: 7, cursor: 'pointer', fontSize: 11.5, color: r.validado ? C.verdeTexto : C.grafiteMedio, fontWeight: r.validado ? 700 : 500 }}>
+                      <input type="checkbox" checked={r.validado} onChange={(e) => onToggleValidation(r.uid, e.target.checked)} aria-label={`Marcar linha ${r.linhaOriginal} como validada e concluída`} style={{ width: 17, height: 17, accentColor: C.verde, cursor: 'pointer' }} />
+                      {r.validado ? 'Concluído' : 'Validar e concluir'}
+                    </label>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function PaginationBar({ page, totalPages, onPage, total, pageSize }) {
+  if (total === 0) return null;
+  const start = (page - 1) * pageSize + 1;
+  const end = Math.min(total, page * pageSize);
+  return (
+    <div className="flex items-center justify-between" style={{ marginTop: 12 }}>
+      <span className="mono" style={{ fontSize: 11.5, color: C.grafiteMedio }}>Mostrando {numFmt.format(start)}–{numFmt.format(end)} de {numFmt.format(total)}</span>
+      <div className="flex items-center" style={{ gap: 8 }}>
+        <button onClick={() => onPage(Math.max(1, page - 1))} disabled={page <= 1} className="btn btn-outline focusable" style={{ padding: '7px 16px' }}>Anterior</button>
+        <span className="mono" style={{ fontSize: 11.5, color: C.grafiteMedio }}>{page} / {totalPages}</span>
+        <button onClick={() => onPage(Math.min(totalPages, page + 1))} disabled={page >= totalPages} className="btn btn-outline focusable" style={{ padding: '7px 16px' }}>Próxima</button>
+      </div>
+    </div>
+  );
+}
