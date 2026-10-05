@@ -108,6 +108,7 @@ const C = {
 const CATEGORIES = [
   'Aguardando documentação de transporte',
   'Atraso no apontamento de entrega - item no prazo',
+  'Item cancelado',
   'Condições Meteorológicas',
   'Demanda extemporânea/Atraso na programação marítima',
   'Falha na coleta/Material programado e não coletado',
@@ -123,9 +124,14 @@ const CATEGORIES = [
   'Retenção de via',
   'RT imperfeita/Pendência de informação no SAP',
   'Sistemas Indisponíveis',
+  'Item suspenso',
+  'Falha na programação',
+  'Troca contratual',
 ];
 const REVISAO = 'Revisão manual necessária';
 const SEM_JUSTIFICATIVA = 'Sem justificativa informada';
+const CUSTOM_CATEGORIES_STORAGE_KEY = 'causaai:categorias-personalizadas:v1';
+const NEW_CATEGORY_VALUE = '__nova_categoria__';
 
 const STAGES = { UPLOAD: 'upload', READING: 'reading', MAPPING: 'mapping', CLASSIFYING: 'classifying', DONE: 'done', ERROR: 'error' };
 const MAX_FILE_MB = 15;
@@ -136,6 +142,34 @@ const FONT_MONO = "'IBM Plex Mono', ui-monospace, monospace";
 /* ------------------------------------------------------------------ */
 function normalize(str) {
   return (str ?? '').toString().normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
+}
+
+function cleanCategoryName(value) {
+  return String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, 80);
+}
+
+function loadCustomCategories() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(CUSTOM_CATEGORIES_STORAGE_KEY) || '[]');
+    if (!Array.isArray(saved)) return [];
+    const reserved = new Set([...CATEGORIES, REVISAO, SEM_JUSTIFICATIVA, 'Todas', NEW_CATEGORY_VALUE].map(normalize));
+    const seen = new Set();
+    return saved.reduce((items, value) => {
+      const name = cleanCategoryName(value);
+      const normalized = normalize(name);
+      if (name && !reserved.has(normalized) && !seen.has(normalized)) {
+        seen.add(normalized);
+        items.push(name);
+      }
+      return items;
+    }, []);
+  } catch (e) {
+    return [];
+  }
+}
+
+function saveCustomCategories(categories) {
+  try { localStorage.setItem(CUSTOM_CATEGORIES_STORAGE_KEY, JSON.stringify(categories)); } catch (e) {}
 }
 
 const COLUMN_HINTS = {
@@ -186,12 +220,12 @@ function isValidPetrobrasEmail(email) {
   return e.split('@').pop() === 'petrobras.com.br';
 }
 
-function matchCategory(str) {
+function matchCategory(str, categories = CATEGORIES) {
   if (!str) return null;
-  const exact = CATEGORIES.find((c) => c === str);
+  const exact = categories.find((c) => c === str);
   if (exact) return exact;
   const n = normalize(str);
-  return CATEGORIES.find((c) => normalize(c) === n) || null;
+  return categories.find((c) => normalize(c) === n) || null;
 }
 
 const numFmt = new Intl.NumberFormat('pt-BR');
@@ -218,6 +252,25 @@ function learnedKeyFor(normalizedText) {
   return `aprendido:v1:${hashText(normalizedText)}`;
 }
 
+// Regras de aprendizado consolidadas a partir do pacote de validação de
+// 02/10/2026. Textos cuja decisão foi validada manualmente têm prioridade
+// sobre regras genéricas, para preservar exatamente o padrão aprovado.
+const VALIDATED_EXACT_RULES = new Map([
+  ['troca contratual', 'Troca contratual'],
+  ['demanda do t42', 'Troca contratual'],
+  ['cancelado status 9', 'Item cancelado'],
+  ['cancelado status 09', 'Item cancelado'],
+  ['faltoso', 'Item suspenso'],
+  ['suspenso', 'Item suspenso'],
+  ['atraso no inicio do carregamento', 'Indisponibilidade Origem'],
+  ['sobreposicao de atendimento', 'Falta de Equipamento de Transporte'],
+  ['atendimento t45', 'Falta de Equipamento de Transporte'],
+  ['local adm foi finalizado dentro do prazo', 'Indisponibilidade Destino'],
+  ['demanda t45', 'RT imperfeita/Pendência de informação no SAP'],
+  ['status 14 desmembrado', 'RT imperfeita/Pendência de informação no SAP'],
+  ['1-1 esta em status 11 desdobrado', 'RT imperfeita/Pendência de informação no SAP'],
+]);
+
 function greenShade(i, total) {
   const dark = [11, 110, 58], light = [149, 214, 178];
   const t = total <= 1 ? 0 : i / (total - 1);
@@ -230,15 +283,15 @@ function greenShade(i, total) {
 /*  chave de API que o próprio usuário informar, para tentar classificar */
 /*  o que o motor de regras local deixou em "Revisão manual necessária". */
 /* ------------------------------------------------------------------ */
-function buildAiSystemPrompt() {
+function buildAiSystemPrompt(categories = CATEGORIES) {
   return `Você é um especialista em logística, transporte rodoviário e operações portuárias, atuando como o segundo nível de análise de um sistema de classificação de atrasos de entrega.
 
 IMPORTANTE SOBRE O CONTEXTO: as justificativas que você vai receber já passaram por um motor de regras baseado em correspondência literal de palavras-chave e NÃO puderam ser classificadas com segurança por ele — ou seja, não contêm nenhum termo exato que bata diretamente numa regra. Por isso, sua análise deve ser DIFERENTE da busca por palavras-chave: leia cada frase por inteiro e identifique a causa raiz pelo CONTEXTO e pelo SENTIDO, mesmo quando a redação for indireta, incompleta, cheia de gírias internas, erros de digitação, siglas não convencionais ou frases mal formadas. Você tem capacidade de compreensão que um motor de regras não tem — use-a. Não hesite em atribuir confiança alta quando o contexto deixar a causa clara, mesmo que nenhuma palavra "óbvia" apareça no texto; evite jogar tudo para baixa confiança só por cautela.
 
-Classifique cada justificativa em EXATAMENTE UMA das 17 categorias fechadas abaixo. Nunca invente categorias fora da lista.
+Classifique cada justificativa em EXATAMENTE UMA das ${categories.length} categorias fechadas abaixo. Nunca invente categorias fora da lista.
 
 Categorias fechadas:
-${CATEGORIES.map((c, i) => `${i + 1}. ${c}`).join('\n')}
+${categories.map((c, i) => `${i + 1}. ${c}`).join('\n')}
 
 Dicas de domínio para resolver ambiguidades pelo contexto:
 - "Apontamento" é o registro no sistema, não a entrega física. Se a entrega ocorreu no prazo mas o atraso é só um erro de registro/lançamento, use "Atraso no apontamento de entrega - item no prazo"; se a falha de registro foi do porto, use "Falha no apontamento de entrega pelo porto".
@@ -254,7 +307,7 @@ Dicas de domínio para resolver ambiguidades pelo contexto:
 
 Para cada justificativa numerada que receber, devolva um objeto com:
 - "n": o número do item (inteiro)
-- "categoria": o texto EXATO de uma das 17 categorias acima
+- "categoria": o texto EXATO de uma das ${categories.length} categorias acima
 - "confianca": inteiro de 0 a 100 com a certeza da classificação, refletindo genuinamente sua leitura do contexto
 - "racional": no máximo 15 palavras, em português, explicando a causa raiz identificada pelo contexto (não cite "palavra-chave")
 - "causaSecundaria": se outra categoria da lista também for mencionada como causa secundária, o texto exato dela; caso contrário null
@@ -266,7 +319,7 @@ Regras:
 - Responda APENAS com um array JSON válido e compacto, sem markdown, sem texto antes ou depois, no formato: [{"n":1,"categoria":"...","confianca":85,"racional":"...","causaSecundaria":null}]`;
 }
 
-async function classifyBatchAI(items, apiKey) {
+async function classifyBatchAI(items, apiKey, categories = CATEGORIES) {
   const listText = items.map((it, i) => `${i + 1}. "${it.replace(/"/g, "'").slice(0, 400)}"`).join('\n');
   const response = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
@@ -280,7 +333,7 @@ async function classifyBatchAI(items, apiKey) {
       model: 'claude-sonnet-5',
       max_tokens: 1000,
       temperature: 0,
-      system: buildAiSystemPrompt(),
+      system: buildAiSystemPrompt(categories),
       messages: [{ role: 'user', content: `Classifique estas ${items.length} justificativas de atraso:\n${listText}` }],
     }),
   });
@@ -307,6 +360,14 @@ async function classifyBatchAI(items, apiKey) {
 /*  escolhida.                                                         */
 /* ------------------------------------------------------------------ */
 const RULES = [
+  { categoria: 'Troca contratual', patterns: [
+    { re: /troca contratual/, label: 'troca contratual', w: 5 },
+    { re: /demanda do t42/, label: 'demanda do T42', w: 5 },
+  ]},
+  { categoria: 'Falha na programação', patterns: [
+    { re: /falha na programacao/, label: 'falha na programação', w: 5 },
+    { re: /atendimento.{0,40}(disponivel|disponibilizado).{0,40}(dia|para)/, label: 'atendimento disponibilizado para data futura', w: 5 },
+  ]},
   { categoria: 'Condições Meteorológicas', patterns: [
     { re: /\bchuva/, label: 'chuva', w: 2 }, { re: /chuvoso/, label: 'chuvoso', w: 1 }, { re: /temporal/, label: 'temporal', w: 2 },
     { re: /tempestade/, label: 'tempestade', w: 2 }, { re: /ressaca/, label: 'ressaca', w: 2 }, { re: /neblina|nevoeiro/, label: 'neblina/nevoeiro', w: 2 },
@@ -344,6 +405,7 @@ const RULES = [
     { re: /\btos\b.{0,15}(falha|erro)/, label: 'falha no TOS', w: 2 },
   ]},
   { categoria: 'Atraso no apontamento de entrega - item no prazo', patterns: [
+    { re: /agendamento pbg.{0,80}finalizado dentro do prazo/, label: 'agendamento PBG finalizado dentro do prazo', w: 5 },
     { re: /apontamento.{0,20}(atraso|erro|falha|incorret)/, label: 'erro de apontamento', w: 3 },
     { re: /entreg(a|ue).{0,15}no prazo.{0,25}apontamento/, label: 'entrega no prazo, apontamento com erro', w: 3 },
     { re: /erro de (lan[cç]amento|apontamento)/, label: 'erro de lançamento', w: 3 }, { re: /falha no lan[cç]amento/, label: 'falha no lançamento', w: 3 },
@@ -387,6 +449,8 @@ const RULES = [
     { re: /(operador|empilhadeira).{0,50}(descarga|descarreg)/, label: 'recurso de descarga indisponível no destino', w: 4 },
   ]},
   { categoria: 'Indisponibilidade Origem', patterns: [
+    { re: /atraso no inicio do carregamento/, label: 'atraso no início do carregamento', w: 5 },
+    { re: /aguardando agendamento[\s\S]{0,200}destino administrativo/, label: 'aguardando agendamento para destino administrativo', w: 5 },
     { re: /origem nao liberou/, label: 'origem não liberou', w: 3 }, { re: /fabrica nao liberou/, label: 'fábrica não liberou', w: 3 },
     { re: /origem indisponivel/, label: 'origem indisponível', w: 3 }, { re: /nao liberado pela origem/, label: 'não liberado pela origem', w: 3 },
     { re: /fabrica fechada/, label: 'fábrica fechada', w: 2 }, { re: /produ[cç][aã]o atrasada/, label: 'produção atrasada', w: 2 },
@@ -401,11 +465,14 @@ const RULES = [
     { re: /\bfurto\b/, label: 'furto', w: 3 }, { re: /nao localizad/, label: 'não localizado', w: 2 }, { re: /desaparecid/, label: 'desaparecido', w: 2 }, { re: /sinistro/, label: 'sinistro', w: 2 },
   ]},
   { categoria: 'Material Indisponível', patterns: [
+    { re: /inicio do lep\s*24\s*horas.{0,90}finalizado/, label: 'LEP de 24 horas para atendimento', w: 5 },
+    { re: /programado fora do prazo\s+\d{1,2}\/\d{1,2}/, label: 'programado fora do prazo com data', w: 5 },
     { re: /sem estoque/, label: 'sem estoque', w: 3 }, { re: /falta de estoque/, label: 'falta de estoque', w: 3 },
     { re: /material indisponivel/, label: 'material indisponível', w: 3 }, { re: /indisponibilidade de material/, label: 'indisponibilidade de material', w: 3 },
     { re: /estoque zerado/, label: 'estoque zerado', w: 3 }, { re: /sem material/, label: 'sem material', w: 2 }, { re: /\bestoque\b/, label: 'estoque', w: 1 },
   ]},
   { categoria: 'Material Recusado', patterns: [
+    { re: /status 10 faltoso.{0,300}pacu sa[ií]da/, label: 'status 10 com PACU de saída pendente', w: 8 },
     { re: /recebimento recusado/, label: 'recebimento recusado', w: 3 }, { re: /material recusado/, label: 'material recusado', w: 3 },
     { re: /\brecusa\b|recusou|recusad/, label: 'recusa', w: 2 }, { re: /nao aceitou (a )?(carga|entrega|material)/, label: 'não aceitou a carga', w: 3 },
     { re: /rejeitad/, label: 'rejeitado', w: 2 }, { re: /devolvid/, label: 'devolvido', w: 2 }, { re: /avari/, label: 'avaria', w: 1 }, { re: /danificad/, label: 'danificado', w: 1 },
@@ -413,6 +480,7 @@ const RULES = [
     { re: /nao poderia realizar o recebimento/, label: 'destino impossibilitado de receber material', w: 4 },
   ]},
   { categoria: 'RT imperfeita/Pendência de informação no SAP', patterns: [
+    { re: /envio do lep[\s\S]{0,120}prazo final/, label: 'envio do LEP com prazo final pendente', w: 5 },
     { re: /\brt\b.{0,20}(pendente|pendencia|incompleta|incorreta|errada|erro)/, label: 'RT com pendência', w: 3 },
     { re: /romaneio.{0,20}(pendente|incompleto|incorreto|errado)/, label: 'romaneio com pendência', w: 3 },
     { re: /sap.{0,20}(pendente|pendencia|incompleta|incorreta|dado incorreto|falta preencher)/, label: 'pendência no SAP', w: 3 },
@@ -429,6 +497,7 @@ const RULES = [
     { re: /(indisponibilidade.{0,35}sistema de agendamento|sistema de agendamento.{0,35}indisponivel)/, label: 'sistema de agendamento indisponível', w: 4 },
   ]},
   { categoria: 'Aguardando documentação de transporte', patterns: [
+    { re: /ajuste de programacao.{0,80}processo anexado.{0,40}csp/, label: 'ajuste de programação com processo no CSP', w: 5 },
     { re: /nota fiscal.{0,15}(pendente|atrasada|nao emitida|sem emissao)/, label: 'NF pendente', w: 3 },
     { re: /emiss[aã]o.{0,20}nota fiscal|nota fiscal.{0,20}emiss[aã]o/, label: 'emissão de NF pendente', w: 3 },
     { re: /aguardando emiss[aã]o/, label: 'aguardando emissão', w: 3 },
@@ -437,6 +506,18 @@ const RULES = [
     { re: /aguardando (nf|cte)/, label: 'aguardando NF/CTe', w: 2 }, { re: /nota fiscal/, label: 'nota fiscal', w: 1 }, { re: /\bcte\b/, label: 'CTe', w: 1 },
     { re: /(falta|ausencia) de documentacao.{0,90}\b(nf|rt)\b/, label: 'NF ou RT pendente para carregamento', w: 4 },
     { re: /aguardando.{0,35}\b(fgr|nea)\b/, label: 'FGR ou NEA pendente', w: 4 },
+  ]},
+  { categoria: 'Item suspenso', patterns: [
+    { re: /^faltoso$/, label: 'faltoso', w: 5 },
+    { re: /\bsuspens[oa]\b/, label: 'suspenso(a)', w: 3 },
+    { re: /\bsuspensao\b/, label: 'suspensao', w: 3 },
+    { re: /pedido.{0,30}suspens/, label: 'pedido suspenso', w: 4 },
+  ]},
+  { categoria: 'Item cancelado', patterns: [
+    { re: /cancelado status\s*0?9/, label: 'cancelado no status 9', w: 5 },
+    { re: /pedido.{0,30}cancelad/, label: 'pedido cancelado', w: 5 },
+    { re: /\bcancelad[oa]\b/, label: 'cancelado(a)', w: 2 },
+    { re: /\bcancelamento\b/, label: 'cancelamento', w: 2 },
   ]},
 ];
 
@@ -447,6 +528,15 @@ const RULES = [
 // palavras-chave isoladas, o que amplia a cobertura sem perder precisão.
 function classifyLocal(justificativaOriginal) {
   const text = normalize(justificativaOriginal);
+  const validatedCategory = VALIDATED_EXACT_RULES.get(text);
+  if (validatedCategory) {
+    return {
+      categoria: validatedCategory,
+      confianca: 100,
+      racional: 'Classificação consolidada a partir de uma validação manual aprovada.',
+      causaSecundaria: null,
+    };
+  }
   const scores = RULES.map((rule) => {
     if (rule.exclude && rule.exclude.some((re) => re.test(text))) return { categoria: rule.categoria, matched: [], score: 0 };
     const matched = rule.patterns.filter((p) => p.re.test(text));
@@ -483,6 +573,9 @@ function App() {
   const [authLoading] = useState(false);
   const [loginError, setLoginError] = useState('');
   const [manualOpen, setManualOpen] = useState(false);
+  const [customCategories, setCustomCategories] = useState(loadCustomCategories);
+  const [categoryDialog, setCategoryDialog] = useState({ open: false, rowUid: null });
+  const availableCategories = useMemo(() => [...CATEGORIES, ...customCategories], [customCategories]);
 
   const handleLogin = (rawEmail) => {
     const trimmed = (rawEmail || '').trim();
@@ -704,14 +797,14 @@ function App() {
       for (const batch of aiBatches) {
         if (cancelRef.current) break;
         try {
-          const parsed = await classifyBatchAI(batch.map(([, info]) => info.sampleText), aiApiKey);
+          const parsed = await classifyBatchAI(batch.map(([, info]) => info.sampleText), aiApiKey, availableCategories);
           anyBatchSucceeded = true;
           batch.forEach(([norm], idx) => {
             const found = Array.isArray(parsed) ? parsed.find((p) => Number(p.n) === idx + 1) : null;
-            let categoria = found ? matchCategory(found.categoria) : null;
+            let categoria = found ? matchCategory(found.categoria, availableCategories) : null;
             let confianca = found ? Math.max(0, Math.min(100, Math.round(Number(found.confianca) || 0))) : 0;
             let racional = found && found.racional ? `IA: ${String(found.racional).slice(0, 200)}` : 'IA não conseguiu classificar este item.';
-            const causaSecundaria = found ? matchCategory(found.causaSecundaria) : null;
+            const causaSecundaria = found ? matchCategory(found.causaSecundaria, availableCategories) : null;
             if (!categoria) { categoria = REVISAO; confianca = 0; }
             if (confianca < 60) categoria = REVISAO;
             classifiedByNorm.set(norm, { categoria, confianca, racional, causaSecundaria });
@@ -765,6 +858,24 @@ function App() {
   };
   const setDraftCorrection = (uid, categoria) => {
     setDraftCorrections((prev) => ({ ...prev, [uid]: categoria }));
+  };
+  const openCategoryDialog = (rowUid = null) => setCategoryDialog({ open: true, rowUid });
+  const closeCategoryDialog = () => setCategoryDialog({ open: false, rowUid: null });
+  const createCustomCategory = (rawName) => {
+    const name = cleanCategoryName(rawName);
+    if (!name) return { ok: false, message: 'Informe o nome da nova categoria.' };
+    if (name.length < 3) return { ok: false, message: 'Use ao menos 3 caracteres no nome da categoria.' };
+    if (normalize(name) === 'todas' || name === NEW_CATEGORY_VALUE) return { ok: false, message: 'Escolha um nome diferente para a categoria.' };
+
+    const existing = [...availableCategories, REVISAO, SEM_JUSTIFICATIVA].find((category) => normalize(category) === normalize(name));
+    if (existing) return { ok: false, message: `A categoria "${existing}" já existe.` };
+
+    const next = [...customCategories, name].sort((a, b) => a.localeCompare(b, 'pt-BR'));
+    setCustomCategories(next);
+    saveCustomCategories(next);
+    if (categoryDialog.rowUid) setDraftCorrection(categoryDialog.rowUid, name);
+    closeCategoryDialog();
+    return { ok: true, name };
   };
   const applyDraftCorrection = (uid) => {
     const categoria = draftCorrections[uid];
@@ -864,7 +975,7 @@ function App() {
   }, [displayResults, hasDates]);
 
   const transportadoras = useMemo(() => ['Todas', ...Array.from(new Set(displayResults.map((r) => r.transportadora))).sort((a, b) => a.localeCompare(b, 'pt-BR'))], [displayResults]);
-  const categoriasPresentes = useMemo(() => ['Todas', ...Array.from(new Set(displayResults.map((r) => r.categoriaFinal))).sort((a, b) => a.localeCompare(b, 'pt-BR'))], [displayResults]);
+  const categoriasPresentes = useMemo(() => ['Todas', ...Array.from(new Set([...availableCategories, ...displayResults.map((r) => r.categoriaFinal)])).sort((a, b) => a.localeCompare(b, 'pt-BR'))], [availableCategories, displayResults]);
 
   const filteredSorted = useMemo(() => {
     const s = normalize(search);
@@ -924,7 +1035,10 @@ function App() {
       .filter((r) => r.validado || r.corrigidoManualmente)
       .map((r) => `| ${markdownCell(r.abaOrigem)} | ${markdownCell(r.linhaOriginal)} | ${markdownCell(r.transportadora)} | ${markdownCell(r.pedido)} | ${markdownCell(r.categoriaPadronizada)} | ${markdownCell(r.categoriaFinal)} | ${r.corrigidoManualmente ? 'Sim' : 'Não'} | ${r.validado ? 'Sim' : 'Não'} | ${r.confiancaPct}% | ${markdownCell(r.justificativaOriginal)} |`)
       .join('\n');
-    const markdown = `# Pacote de validação para evolução do classificador\n\nGerado em: ${dataGeracao}\n\n## Indicadores de validação\n\n| Métrica | Valor |\n| --- | ---: |\n| Registros analisados | ${validationStats.total} |\n| Registros validados e concluídos | ${validationStats.validado} |\n| Registros pendentes | ${validationStats.pendente} |\n| Taxa de validação | ${validationStats.taxaValidacao}% |\n| Classificações ajustadas | ${validationStats.ajustado} |\n| Taxa de ajuste do modelo | ${validationStats.taxaAjuste}% |\n\n## Registros para aprendizado\n\nInclui linhas validadas e/ou com categoria modificada. Compartilhe este arquivo com a equipe responsável pela evolução das regras.\n\n| Aba | Linha | Transportadora | Pedido/NF | Sugestão do modelo | Categoria final | Ajustado | Validado | Confiança | Justificativa original |\n| --- | ---: | --- | --- | --- | --- | --- | --- | ---: | --- |\n${linhas || '| — | — | — | — | — | — | — | — | — | Nenhum registro validado ou ajustado. |'}\n`;
+    const categoriasCriadas = customCategories.length
+      ? customCategories.map((category) => `- ${markdownCell(category)} (categoria criada pelo usuário; seleção manual até nova regra ser treinada)`).join('\n')
+      : '_Nenhuma categoria personalizada criada neste navegador._';
+    const markdown = `# Pacote de validação para evolução do classificador\n\nGerado em: ${dataGeracao}\n\n## Indicadores de validação\n\n| Métrica | Valor |\n| --- | ---: |\n| Registros analisados | ${validationStats.total} |\n| Registros validados e concluídos | ${validationStats.validado} |\n| Registros pendentes | ${validationStats.pendente} |\n| Taxa de validação | ${validationStats.taxaValidacao}% |\n| Classificações ajustadas | ${validationStats.ajustado} |\n| Taxa de ajuste do modelo | ${validationStats.taxaAjuste}% |\n\n## Categorias personalizadas\n\n${categoriasCriadas}\n\n## Registros para aprendizado\n\nInclui linhas validadas e/ou com categoria modificada. Compartilhe este arquivo com a equipe responsável pela evolução das regras.\n\n| Aba | Linha | Transportadora | Pedido/NF | Sugestão do modelo | Categoria final | Ajustado | Validado | Confiança | Justificativa original |\n| --- | ---: | --- | --- | --- | --- | --- | --- | ---: | --- |\n${linhas || '| — | — | — | — | — | — | — | — | — | Nenhum registro validado ou ajustado. |'}\n`;
     downloadBlob(new Blob(['\uFEFF' + markdown], { type: 'text/markdown;charset=utf-8;' }), `pacote_validacao_ajustes_${new Date().toISOString().slice(0, 10)}.md`);
   };
 
@@ -963,8 +1077,9 @@ function App() {
   return (
     <div style={{ minHeight: '100vh', width: '100%', background: C.painel, color: C.grafite, fontFamily: "'Inter', ui-sans-serif, system-ui, sans-serif" }}>
       <GlobalStyle />
-      <Header done={stage === STAGES.DONE} kpis={kpis} onReset={resetAll} authEmail={authEmail} onLogout={handleLogout} onOpenManual={() => setManualOpen(true)} />
-      <CriteriaManual open={manualOpen} onClose={() => setManualOpen(false)} />
+      <Header done={stage === STAGES.DONE} kpis={kpis} onReset={resetAll} authEmail={authEmail} onLogout={handleLogout} onOpenManual={() => setManualOpen(true)} onOpenCategoryDialog={() => openCategoryDialog()} />
+      <CriteriaManual open={manualOpen} onClose={() => setManualOpen(false)} customCategories={customCategories} />
+      <CategoryDialog open={categoryDialog.open} hasTargetRow={Boolean(categoryDialog.rowUid)} onClose={closeCategoryDialog} onCreate={createCustomCategory} />
 
       <main className="max-w-7xl mx-auto px-4 md:px-8" style={{ paddingTop: 24, paddingBottom: 24 }}>
         {stage === STAGES.UPLOAD && <UploadZone dragOver={dragOver} setDragOver={setDragOver} onDrop={onDrop} onFile={handleFile} />}
@@ -1018,9 +1133,9 @@ function App() {
               dateFrom={dateFrom} setDateFrom={setDateFrom} dateTo={dateTo} setDateTo={setDateTo} hasDates={hasDates}
               resultCount={filteredSorted.length} totalCount={displayResults.length}
               onExportXLSX={exportXLSX} onExportCSV={exportCSV} />
-            <ValidationProgress stats={validationStats} onExportMarkdown={exportValidationMarkdown} />
+            <ValidationProgress stats={validationStats} onExportMarkdown={exportValidationMarkdown} onOpenCategoryDialog={() => openCategoryDialog()} customCategories={customCategories} />
 
-            <ResultsTable rows={pageRows} sortBy={sortBy} sortDir={sortDir} onSort={toggleSort} onDraftChange={setDraftCorrection} onApplyStatus={applyDraftCorrection} onToggleValidation={setValidation} />
+            <ResultsTable rows={pageRows} sortBy={sortBy} sortDir={sortDir} onSort={toggleSort} onDraftChange={setDraftCorrection} onApplyStatus={applyDraftCorrection} onToggleValidation={setValidation} categories={availableCategories} onOpenCategoryDialog={openCategoryDialog} />
             <PaginationBar page={pageClamped} totalPages={totalPages} onPage={setPage} total={filteredSorted.length} pageSize={PAGE_SIZE} />
           </div>
         )}
@@ -1129,7 +1244,7 @@ function LoginScreen({ onSubmit, error }) {
   );
 }
 
-function Header({ done, kpis, onReset, authEmail, onLogout, onOpenManual }) {
+function Header({ done, kpis, onReset, authEmail, onLogout, onOpenManual, onOpenCategoryDialog }) {
   return (
     <header style={{ background: C.verdeHeader, boxShadow: '0 1px 2px rgba(0,0,0,.15), 0 2px 8px rgba(0,0,0,.12)' }}>
       <div className="max-w-7xl mx-auto px-4 md:px-8 flex items-center justify-between flex-wrap" style={{ paddingTop: 14, paddingBottom: 14, gap: 12 }}>
@@ -1156,6 +1271,9 @@ function Header({ done, kpis, onReset, authEmail, onLogout, onOpenManual }) {
           <button onClick={onOpenManual} className="btn btn-ghost-dark focusable" style={{ padding: '8px 13px', fontSize: 12.5 }}>
             <Info size={14} aria-hidden="true" /> Manual de critérios
           </button>
+          <button onClick={onOpenCategoryDialog} className="btn btn-ghost-dark focusable" style={{ padding: '8px 13px', fontSize: 12.5 }}>
+            <span aria-hidden="true" style={{ fontSize: 16, lineHeight: 0 }}>+</span> Nova categoria
+          </button>
           {authEmail && (
             <div className="flex items-center" style={{ gap: 8 }}>
               <span className="hidden sm:inline" style={{ fontSize: 12, color: 'rgba(255,255,255,0.82)' }}>{authEmail}</span>
@@ -1170,12 +1288,13 @@ function Header({ done, kpis, onReset, authEmail, onLogout, onOpenManual }) {
   );
 }
 
-function CriteriaManual({ open, onClose }) {
+function CriteriaManual({ open, onClose, customCategories = [] }) {
   const [query, setQuery] = useState('');
+  const manualRules = [...RULES, ...customCategories.map((categoria) => ({ categoria, patterns: [], personalizada: true }))];
   if (!open) return null;
 
   const search = normalize(query);
-  const visibleRules = RULES.filter((rule) => {
+  const visibleRules = manualRules.filter((rule) => {
     if (!search) return true;
     return normalize(rule.categoria).includes(search) || rule.patterns.some((pattern) => normalize(pattern.label).includes(search));
   });
@@ -1213,8 +1332,14 @@ function CriteriaManual({ open, onClose }) {
             </div>
           </div>
 
+          {customCategories.length > 0 && (
+            <div style={{ padding: '12px 14px', borderRadius: 14, background: C.verdeTint, border: `1px solid #B7DFC6`, marginBottom: 18, fontSize: 12.5, color: C.verdeTexto }}>
+              <strong>Categorias personalizadas:</strong> elas ficam disponíveis para seleção manual, aparecem no pacote de ajustes e podem ser transformadas em regra em uma evolução futura do classificador.
+            </div>
+          )}
+
           <div className="flex items-center justify-between flex-wrap" style={{ gap: 12, marginBottom: 14 }}>
-            <div><h3 style={{ margin: 0, fontSize: 17, fontWeight: 800, color: C.grafite }}>Categorias e critérios reconhecidos</h3><p style={{ margin: '3px 0 0', fontSize: 12.5, color: C.grafiteMedio }}>{visibleRules.length} de {RULES.length} categorias exibidas</p></div>
+            <div><h3 style={{ margin: 0, fontSize: 17, fontWeight: 800, color: C.grafite }}>Categorias e critérios reconhecidos</h3><p style={{ margin: '3px 0 0', fontSize: 12.5, color: C.grafiteMedio }}>{visibleRules.length} de {manualRules.length} categorias exibidas</p></div>
             <div style={{ position: 'relative', minWidth: 240, flex: '1 1 260px', maxWidth: 340 }}><Search size={14} style={{ position: 'absolute', left: 11, top: '50%', transform: 'translateY(-50%)', color: C.grafiteMedio }} aria-hidden="true" /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Buscar motivo ou critério" aria-label="Buscar no manual" className="field focusable" style={{ width: '100%', paddingLeft: 32 }} /></div>
           </div>
 
@@ -1226,7 +1351,9 @@ function CriteriaManual({ open, onClose }) {
                   <div><h4 style={{ margin: 0, color: C.grafite, fontSize: 14, lineHeight: 1.28, fontWeight: 800 }}>{rule.categoria}</h4><p style={{ margin: '5px 0 9px', color: C.grafiteMedio, fontSize: 12 }}>Classifique quando a causa raiz corresponder a um dos critérios abaixo.</p></div>
                 </div>
                 <div className="flex flex-wrap" style={{ gap: 6 }}>
-                  {rule.patterns.map((pattern) => <ManualPill key={pattern.label} label={pattern.label} strong={(pattern.w || 1) >= 3} />)}
+                  {rule.patterns.length
+                    ? rule.patterns.map((pattern) => <ManualPill key={pattern.label} label={pattern.label} strong={(pattern.w || 1) >= 3} />)
+                    : <ManualPill label="Categoria personalizada — seleção manual" strong />}
                 </div>
                 {rule.exclude && <p style={{ margin: '10px 0 0', fontSize: 11.5, color: C.vermelhoTexto }}>Exceção: quando houver contexto de porto, este critério não é aplicado.</p>}
               </article>
@@ -1245,6 +1372,50 @@ function ManualRuleSummary({ number, title, text }) {
 
 function ManualPill({ label, strong = false }) {
   return <span style={{ padding: '4px 8px', borderRadius: 999, fontSize: 11, lineHeight: 1.25, fontWeight: strong ? 700 : 500, color: strong ? C.verdeTexto : C.grafiteMedio, background: strong ? C.verdeTint : '#F5F6F7', border: `1px solid ${strong ? '#B7DFC6' : C.linha}` }}>{label}</span>;
+}
+
+function CategoryDialog({ open, hasTargetRow, onClose, onCreate }) {
+  const [name, setName] = useState('');
+  const [error, setError] = useState('');
+  if (!open) return null;
+
+  const handleClose = () => {
+    setName('');
+    setError('');
+    onClose();
+  };
+  const handleSubmit = (event) => {
+    event.preventDefault();
+    const outcome = onCreate(name);
+    if (!outcome.ok) setError(outcome.message);
+    else {
+      setName('');
+      setError('');
+    }
+  };
+
+  return (
+    <div role="dialog" aria-modal="true" aria-labelledby="new-category-title" onMouseDown={handleClose} style={{ position: 'fixed', inset: 0, zIndex: 70, padding: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(18,32,25,.58)', backdropFilter: 'blur(3px)' }}>
+      <form className="fade-up" onMouseDown={(event) => event.stopPropagation()} onSubmit={handleSubmit} style={{ width: 'min(100%, 460px)', borderRadius: 20, overflow: 'hidden', background: '#fff', boxShadow: '0 28px 80px rgba(0,0,0,.35)' }}>
+        <div style={{ padding: '22px 24px 18px', color: '#fff', background: `linear-gradient(115deg, ${C.verdeHeader}, ${C.verdeSinal})` }}>
+          <h2 id="new-category-title" style={{ margin: 0, fontSize: 20, fontWeight: 800 }}>Criar nova categoria</h2>
+          <p style={{ margin: '5px 0 0', fontSize: 13, lineHeight: 1.45, color: 'rgba(255,255,255,.86)' }}>
+            {hasTargetRow ? 'A categoria será preparada nesta linha. Depois, confirme em “Atualizar status”.' : 'Ela ficará disponível para a seleção manual e para as próximas análises com IA.'}
+          </p>
+        </div>
+        <div style={{ padding: '20px 24px 22px' }}>
+          <label htmlFor="new-category-name" style={{ display: 'block', fontSize: 12.5, fontWeight: 700, color: C.grafite, marginBottom: 6 }}>Nome da categoria</label>
+          <input id="new-category-name" value={name} onChange={(event) => { setName(event.target.value); setError(''); }} placeholder="Ex.: Avaria na carga" maxLength={80} autoFocus className="field focusable" style={{ width: '100%' }} />
+          <p style={{ margin: '8px 0 0', fontSize: 11.5, lineHeight: 1.45, color: C.grafiteMedio }}>A categoria nova começa como seleção manual. Ela será enviada no arquivo de ajustes para evolução das regras.</p>
+          {error && <p role="alert" style={{ margin: '10px 0 0', fontSize: 12, fontWeight: 600, color: C.vermelhoTexto }}>{error}</p>}
+          <div className="flex justify-end" style={{ gap: 9, marginTop: 18 }}>
+            <button type="button" onClick={handleClose} className="btn btn-outline focusable">Cancelar</button>
+            <button type="submit" className="btn btn-primary focusable">{hasTargetRow ? 'Criar e selecionar' : 'Criar categoria'}</button>
+          </div>
+        </div>
+      </form>
+    </div>
+  );
 }
 
 function StageBreadcrumb() {
@@ -1580,7 +1751,7 @@ function KpiGrid({ kpis }) {
   );
 }
 
-function ValidationProgress({ stats, onExportMarkdown }) {
+function ValidationProgress({ stats, onExportMarkdown, onOpenCategoryDialog, customCategories = [] }) {
   const cards = [
     { label: 'Concluídos', value: numFmt.format(stats.validado), detail: `de ${numFmt.format(stats.total)} registros`, tint: C.verdeTint, color: C.verdeTexto },
     { label: 'Taxa de validação', value: `${stats.taxaValidacao}%`, detail: 'marcados como concluídos', tint: '#EAF4FF', color: '#185FA5' },
@@ -1597,7 +1768,10 @@ function ValidationProgress({ stats, onExportMarkdown }) {
             <p style={{ fontSize: 11.5, color: C.grafiteMedio, marginTop: 2 }}>Escolha o motivo, confirme em “Atualizar status” e marque a linha revisada como concluída.</p>
           </div>
         </div>
-        <button onClick={onExportMarkdown} className="btn btn-primary focusable" title="Baixar pacote de validação para compartilhar e evoluir o classificador"><Download size={14} aria-hidden="true" /> Salvar ajustes (.md)</button>
+        <div className="flex items-center" style={{ gap: 8 }}>
+          <button onClick={onOpenCategoryDialog} className="btn btn-outline focusable" title="Criar categoria para a seleção manual"><span aria-hidden="true" style={{ fontSize: 16, lineHeight: 0 }}>+</span> Nova categoria</button>
+          <button onClick={onExportMarkdown} className="btn btn-primary focusable" title="Baixar pacote de validação para compartilhar e evoluir o classificador"><Download size={14} aria-hidden="true" /> Salvar ajustes (.md)</button>
+        </div>
       </div>
       <div style={{ padding: 16 }}>
         <div className="grid grid-cols-2 lg:grid-cols-4" style={{ gap: 10 }}>
@@ -1614,7 +1788,7 @@ function ValidationProgress({ stats, onExportMarkdown }) {
         </div>
         <div className="flex flex-wrap items-center justify-between" style={{ gap: 8, marginTop: 8 }}>
           <span style={{ fontSize: 11.5, color: C.grafiteMedio }}>Andamento: <strong style={{ color: C.verdeTexto }}>{stats.taxaValidacao}% concluído</strong></span>
-          <span style={{ fontSize: 11.5, color: C.grafiteMedio }}>O arquivo inclui indicadores e as linhas validadas ou ajustadas.</span>
+          <span style={{ fontSize: 11.5, color: C.grafiteMedio }}>{customCategories.length ? `${customCategories.length} categoria(s) personalizada(s) incluída(s) no pacote de ajustes.` : 'O arquivo inclui indicadores e as linhas validadas ou ajustadas.'}</span>
         </div>
       </div>
     </div>
@@ -1831,7 +2005,7 @@ function SortHeader({ label, field, sortBy, sortDir, onSort }) {
   );
 }
 
-function CategorySelect({ row, onDraftChange, onApplyStatus }) {
+function CategorySelect({ row, onDraftChange, onApplyStatus, categories, onOpenCategoryDialog }) {
   const current = row.categoriaSelecionada || row.categoriaFinal;
   const isReview = current === REVISAO;
   const isEmpty = current === SEM_JUSTIFICATIVA;
@@ -1840,14 +2014,23 @@ function CategorySelect({ row, onDraftChange, onApplyStatus }) {
   const bg = pending || edited ? C.amareloTint : isReview ? C.vermelhoTint : isEmpty ? C.painel : C.verdeTint;
   const border = pending || edited ? C.amarelo : isReview ? C.vermelho : isEmpty ? C.linha : C.verde;
   const text = pending || edited ? C.amareloTexto : isReview ? C.vermelhoTexto : isEmpty ? C.grafiteMedio : C.verdeTexto;
-  const options = [...CATEGORIES, REVISAO, SEM_JUSTIFICATIVA];
+  const options = [...categories, REVISAO, SEM_JUSTIFICATIVA];
+  const handleChange = (event) => {
+    const value = event.target.value;
+    if (value === NEW_CATEGORY_VALUE) {
+      onOpenCategoryDialog(row.uid);
+      return;
+    }
+    onDraftChange(row.uid, value);
+  };
   return (
     <div className="flex flex-col items-start" style={{ gap: 5 }}>
-      <select value={current} onChange={(e) => onDraftChange(row.uid, e.target.value)}
+      <select value={current} onChange={handleChange}
         title={`Sugestão da regra: ${row.categoriaPadronizada}${row.racionalIA ? ' — ' + row.racionalIA : ''}`}
         aria-label={`Selecione o motivo da entrega, linha ${row.linhaOriginal}`} className="focusable"
         style={{ fontSize: 12, fontWeight: 600, padding: '6px 12px', borderRadius: 999, border: `1px solid ${border}`, background: bg, color: text, maxWidth: '15rem', cursor: 'pointer' }}>
         {options.map((c) => <option key={c} value={c}>{c}</option>)}
+        <option value={NEW_CATEGORY_VALUE}>+ Criar nova categoria...</option>
       </select>
       {pending ? (
         <div className="flex items-center" style={{ gap: 6 }}>
@@ -1871,7 +2054,7 @@ function ConfidenceBadge({ value }) {
   return <span className="mono" title={`Confiança: ${tone.label.toLowerCase()}`} style={{ fontSize: 11, fontWeight: 700, padding: '4px 10px', borderRadius: 999, background: tone.bg, color: tone.fg, display: 'inline-block' }}>{value}%</span>;
 }
 
-function ResultsTable({ rows, sortBy, sortDir, onSort, onDraftChange, onApplyStatus, onToggleValidation }) {
+function ResultsTable({ rows, sortBy, sortDir, onSort, onDraftChange, onApplyStatus, onToggleValidation, categories, onOpenCategoryDialog }) {
   return (
     <div className="card" style={{ marginTop: 16, overflow: 'hidden' }}>
       <div style={{ overflowX: 'auto' }}>
@@ -1909,7 +2092,7 @@ function ResultsTable({ rows, sortBy, sortDir, onSort, onDraftChange, onApplySta
                     </div>
                     {isReview && <span style={{ fontSize: 10.5, fontWeight: 700, color: C.vermelhoTexto }}>Revisão manual</span>}
                   </td>
-                  <td style={{ padding: '10px 14px', verticalAlign: 'top' }}><CategorySelect row={r} onDraftChange={onDraftChange} onApplyStatus={onApplyStatus} /></td>
+                  <td style={{ padding: '10px 14px', verticalAlign: 'top' }}><CategorySelect row={r} onDraftChange={onDraftChange} onApplyStatus={onApplyStatus} categories={categories} onOpenCategoryDialog={onOpenCategoryDialog} /></td>
                   <td style={{ padding: '10px 14px', verticalAlign: 'top' }}><ConfidenceBadge value={r.confiancaPct} /></td>
                   <td style={{ padding: '10px 14px', verticalAlign: 'top', minWidth: 140 }}>
                     <label className="flex items-center" style={{ gap: 7, cursor: 'pointer', fontSize: 11.5, color: r.validado ? C.verdeTexto : C.grafiteMedio, fontWeight: r.validado ? 700 : 500 }}>
