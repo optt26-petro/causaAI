@@ -229,6 +229,158 @@ const VALIDATED_EXACT_RULES = new Map([
   ['1-1 esta em status 11 desdobrado', 'RT imperfeita/Pendência de informação no SAP'],
 ]);
 
+// Base treinada gerada a partir de 700 registros validados em pacotes de
+// validação (último pacote: 15/10/2026). Gerada por tools/gerar_base_treinada.py.
+// k = chave de treino (texto normalizado, números mascarados como #),
+// c = categoria validada, n = nº de validações, alt = categoria empatada.
+const TRAINED_BASE_INFO = { registros: 700, padroes: 110, atualizadoEm: '15/10/2026' };
+const TRAINED_BASE = [
+  {"k": "# lep# possui agendamento previsto para as # #h dessa forma a programacao encontra se dentro do horario definido para atendimento devendo a execucao ocorrer conforme janela operacional estabelecida", "c": "Aguardando documentação de transporte", "n": 39},
+  {"k": "a demanda requer aet entretanto por se tratar de um conjunto com aproximadamente # metros de comprimento normalmente a transportadora ja possui esse tipo de autorizacao de toda forma a solicitacao foi encaminhada a transportadora na data de hoje e a programacao permanece condicionada a disponibilizacao da licenca", "c": "Aguardando documentação de transporte", "n": 21},
+  {"k": "aguardando arquivo fiscal", "c": "Aguardando documentação de transporte", "n": 2},
+  {"k": "aguardando carta de correcao alterando a transportadora", "c": "Aguardando documentação de transporte", "n": 1},
+  {"k": "aguardando carta de correcao com a troca de transportadora", "c": "Aguardando documentação de transporte", "n": 2},
+  {"k": "pendencia de documentacao para seguir com o transporte", "c": "Aguardando documentação de transporte", "n": 16},
+  {"k": "pendencia de envio da documentacao certificado para seguir com o transporte", "c": "Aguardando documentação de transporte", "n": 1},
+  {"k": "a frota chegou ao destino em # # as # # dentro do prazo estabelecido", "c": "Atraso no apontamento de entrega - item no prazo", "n": 2},
+  {"k": "apontamento tardio a frota chegou ao destino em # # porem o registro da movimentacao foi realizado de forma posterior a efetiva chegada do veiculo", "c": "Atraso no apontamento de entrega - item no prazo", "n": 2},
+  {"k": "conforme analise da programacao a demanda # lep# encontra se dentro do prazo previsto o veiculo iniciou o deslocamento em # # # as # # # possuindo agendamento vix # ag # para atendimento em # # # as # # no destino lon# pbg considerando que a operacao contempla mais de um destino aplica se o acrescimo de # horas ao prazo de atendimento alem disso o mdf e foi emitido apenas em # # # as # # # marco operacional que impacta diretamente o transito da carga dessa forma nao ha caracterizacao de atraso uma vez que o atendimento permanece dentro da janela operacional estabelecida", "c": "Atraso no apontamento de entrega - item no prazo", "n": 2},
+  {"k": "entrega realizada pendente de apontamento", "c": "Atraso no apontamento de entrega - item no prazo", "n": 44},
+  {"k": "entregue no dia da data mais tarde", "c": "Atraso no apontamento de entrega - item no prazo", "n": 2},
+  {"k": "entregue no prazo falha no apontamento", "c": "Atraso no apontamento de entrega - item no prazo", "n": 114},
+  {"k": "falha no apontamento", "c": "Atraso no apontamento de entrega - item no prazo", "n": 26},
+  {"k": "falta de apontamento", "c": "Atraso no apontamento de entrega - item no prazo", "n": 1},
+  {"k": "material entregue no destino porem a demanda permanece pendente de conclusao em razao da ausencia de apontamento no status # aguarda atualizacao sistemica para finalizacao do processo", "c": "Atraso no apontamento de entrega - item no prazo", "n": 2},
+  {"k": "o mdf e foi anexado em # # # as # # sendo este o marco para prosseguimento da operacao considerando os prazos operacionais aplicaveis ao atendimento a contratada possui prazo para conclusao ate # # # as # # dessa forma a demanda permanece dentro do prazo previsto nao sendo caracterizado atraso por parte da transportadora", "c": "Atraso no apontamento de entrega - item no prazo", "n": 2},
+  {"k": "rt foi entregue dentro do prazo", "c": "Atraso no apontamento de entrega - item no prazo", "n": 6},
+  {"k": "devido a paralisacao indisponibilidade no recebimento dos loads em pbg ocasionada por condicoes climaticas adversas incluindo fortes chuvas e incidencia de raios as operacoes foram temporariamente paralisadas como consequencia houve impacto nas coletas de backload comprometendo a programacao dos atendimentos", "c": "Condições Meteorológicas", "n": 4},
+  {"k": "material se encontrava com dsm vencido devido a isso resultou no atraso na coleta do material", "c": "Falha na coleta/Material programado e não coletado", "n": 1},
+  {"k": "atendido # # # # #", "c": "Falha na programação", "n": 6},
+  {"k": "demanda em processo de descarregamento o mdf e foi anexado em # # # as # # e o atendimento segue dentro do fluxo operacional para conclusao da entrega", "c": "Falha na programação", "n": 5},
+  {"k": "demora no descarregamento", "c": "Falha na programação", "n": 1},
+  {"k": "dtm cancelado sem o motivo no dtm", "c": "Falha na programação", "n": 2},
+  {"k": "finalizado no prazo # # # # #", "c": "Falha na programação", "n": 1},
+  {"k": "material do contrato t# ja migrado para o contrato correto", "c": "Falha na programação", "n": 1},
+  {"k": "no prazo # # # # #", "c": "Falha na programação", "n": 2},
+  {"k": "no prazo # # # # # envio do lep # # # # # prazo final", "c": "Falha na programação", "n": 1},
+  {"k": "no prazo # # # # # envio programacao csp # # # # #", "c": "Falha na programação", "n": 1},
+  {"k": "no prazo # # # # # envio programacao csp prazo final # # # # #", "c": "Falha na programação", "n": 1},
+  {"k": "no prazo # # # # # prazo final # horas para entrega envio programacao csp # # # # #", "c": "Falha na programação", "n": 5},
+  {"k": "no prazo atendido # # # # # prazo # # # # #", "c": "Falha na programação", "n": 1},
+  {"k": "no prazo envio programacao csp # # # # # prazo final # # # # #", "c": "Falha na programação", "n": 1},
+  {"k": "programacao realizada hoje a contratada possui prazo ate as #h# e conforme o processo passa a contar com um novo prazo de # horas a partir da data e horario da programacao", "c": "Falha na programação", "n": 1},
+  {"k": "a equipe de frota vix nao conseguiu em tempo habil uma frota para coletar o material", "c": "Falta de Equipamento de Transporte", "n": 2},
+  {"k": "atraso no transporte devido a indisponibilidade de frota para alocacao da demanda em funcao da alta demanda operacional nao foi possivel realizar a coleta dentro do prazo previsto", "c": "Falta de Equipamento de Transporte", "n": 4},
+  {"k": "atrasou pois esta aguardando finalizacao do load para iniciar o back pois alocaram os dois atendimentos sobreposicao de atendimentos na mesma frota", "c": "Falta de Equipamento de Transporte", "n": 1},
+  {"k": "conforme informado pela contratada os recursos encontram se atualmente alocados em outros atendimentos impactando a programacao e execucao desta demanda", "c": "Falta de Equipamento de Transporte", "n": 2, "alt": "Falha na programação"},
+  {"k": "devido a alta demanda de atendimento transportadora nao teve disponibilidade", "c": "Falta de Equipamento de Transporte", "n": 1},
+  {"k": "devido a alta demanda de backload nao foi possivel coletar o material em tempo habil", "c": "Falta de Equipamento de Transporte", "n": 2},
+  {"k": "devido a alta demanda de backload nao foi possivel coletar o material no prazo", "c": "Falta de Equipamento de Transporte", "n": 12},
+  {"k": "devido a dimensao do material so foi possivel coletar via contratacao spot", "c": "Falta de Equipamento de Transporte", "n": 1},
+  {"k": "devido a finalizacao pendente do carregamento load nao foi possivel iniciar a operacao de retorno back alem disso ocorreu sobreposicao de atendimentos uma vez que ambas as demandas foram alocadas para a mesma frota ocasionando o atraso no processo", "c": "Falta de Equipamento de Transporte", "n": 1},
+  {"k": "devido as dimensoes do material foi necessaria a realizacao da coleta via operacao spot demandando a busca e disponibilizacao de equipamento adequado em razao dessa necessidade operacional a coleta nao pode ser realizada dentro do prazo inicialmente previsto", "c": "Falta de Equipamento de Transporte", "n": 1},
+  {"k": "devido as dimensoes do material peso e comprimento foi se necessario utilizar uma prancha # eixos que nao ficou disponivel para coletar o material em tempo habil", "c": "Falta de Equipamento de Transporte", "n": 1},
+  {"k": "falta de equipamento adequado", "c": "Falta de Equipamento de Transporte", "n": 1},
+  {"k": "falta de equipamento de transporte", "c": "Falta de Equipamento de Transporte", "n": 78},
+  {"k": "falta de equipamento para fazer o transporte do material", "c": "Falta de Equipamento de Transporte", "n": 20},
+  {"k": "falta de planejamento logistico da contratada", "c": "Falta de Equipamento de Transporte", "n": 1},
+  {"k": "indisponibilidade de veiculo", "c": "Falta de Equipamento de Transporte", "n": 9},
+  {"k": "indisponibilidade de veiculo material de dimensao especial", "c": "Falta de Equipamento de Transporte", "n": 1},
+  {"k": "agendamento recusado", "c": "Indisponibilidade Destino", "n": 2},
+  {"k": "falta de agendamento", "c": "Indisponibilidade Destino", "n": 2},
+  {"k": "aguardando disponibilidade para coleta", "c": "Indisponibilidade Origem", "n": 1},
+  {"k": "devido a indisponibilidade de janelas para agendamento nao foi possivel coletar o material no prazo", "c": "Indisponibilidade Origem", "n": 1},
+  {"k": "devido ao nao descarregamento do load em pbg devido as condicoes climaticas nao foi possivel coletar os materias em tempo habil", "c": "Indisponibilidade Origem", "n": 3},
+  {"k": "material nao disponivel para a coleta sem retorno da origem", "c": "Indisponibilidade Origem", "n": 2},
+  {"k": "material nao liberado para a coleta sem retorno da origem", "c": "Indisponibilidade Origem", "n": 1},
+  {"k": "no prazo aguardando agendamento inicio # # # # # fim # # # # # prazo final # # # # #", "c": "Indisponibilidade Origem", "n": 1},
+  {"k": "pendencia de agendamento", "c": "Indisponibilidade Origem", "n": 32},
+  {"k": "problema com a documentacao e para o agendamento na coleta", "c": "Indisponibilidade Origem", "n": 2},
+  {"k": "dtm cancelado", "c": "Item cancelado", "n": 1},
+  {"k": "extravio cancelado", "c": "Material Extraviado", "n": 1},
+  {"k": "aguardando origem confirmar disponibiilidade do material para coleta", "c": "Material Indisponível", "n": 1},
+  {"k": "dtm cancelado pois o material nao tava liberado para a coleta", "c": "Material Indisponível", "n": 1},
+  {"k": "dtm cancelado sem retorno sobre o cancelamento", "c": "Material Indisponível", "n": 8},
+  {"k": "material indisponivel", "c": "Material Indisponível", "n": 2},
+  {"k": "material nao disponivel para a coleta", "c": "Material Indisponível", "n": 13},
+  {"k": "material nao disponivel para coleta", "c": "Material Indisponível", "n": 2},
+  {"k": "material nao liberado da embarcacao", "c": "Material Indisponível", "n": 4},
+  {"k": "rt e dtm cancelado pois o material nao tinha sido liberado", "c": "Material Indisponível", "n": 1},
+  {"k": "demanda atrasada devido a recusa por ausencia de ptm ou reserva de retorno impossibilitando a programacao e continuidade do atendimento dentro do prazo previsto", "c": "Material Recusado", "n": 1},
+  {"k": "a rt em questao apresentou algumas pendencias devido a falta e ou divergencia de informacoes referentes a nf e ao dsm no entanto as pendencias foram sanadas hoje e a rt encontra se aguardando programacao", "c": "RT imperfeita/Pendência de informação no SAP", "n": 1},
+  {"k": "aguardando nf", "c": "RT imperfeita/Pendência de informação no SAP", "n": 4},
+  {"k": "atendido # # # # # lep foi criado em # # # # # # faltando notas # # # # # fim # # # # # # carta de correcao # # # # # # fim # # # # # # foi finalizado dentro do prazo", "c": "RT imperfeita/Pendência de informação no SAP", "n": 4},
+  {"k": "atraso no ajuste da nota fiscal", "c": "RT imperfeita/Pendência de informação no SAP", "n": 13},
+  {"k": "divergencia entre a nf e dtm", "c": "RT imperfeita/Pendência de informação no SAP", "n": 6},
+  {"k": "documentacao que foi enviada foi errada", "c": "RT imperfeita/Pendência de informação no SAP", "n": 1},
+  {"k": "dtm cancelado com material com pendencia de nf", "c": "RT imperfeita/Pendência de informação no SAP", "n": 1},
+  {"k": "dtm cancelado para ajustes de documentacao", "c": "RT imperfeita/Pendência de informação no SAP", "n": 7},
+  {"k": "dtm cancelado por divergencia de medidas nf", "c": "RT imperfeita/Pendência de informação no SAP", "n": 2},
+  {"k": "dtm com a quantidade de material divergente", "c": "RT imperfeita/Pendência de informação no SAP", "n": 1},
+  {"k": "dtm com volume divergente da nf", "c": "RT imperfeita/Pendência de informação no SAP", "n": 2},
+  {"k": "dtm divergente dtm cancelado", "c": "RT imperfeita/Pendência de informação no SAP", "n": 1},
+  {"k": "dtm estava com volume errado rt coletada na data de hoje", "c": "RT imperfeita/Pendência de informação no SAP", "n": 3},
+  {"k": "dtm incorreto", "c": "RT imperfeita/Pendência de informação no SAP", "n": 1},
+  {"k": "endereco do destino errado", "c": "RT imperfeita/Pendência de informação no SAP", "n": 2},
+  {"k": "falha na documentacao com o dtm", "c": "RT imperfeita/Pendência de informação no SAP", "n": 1},
+  {"k": "falha na documentacao para seguir com o transporte", "c": "RT imperfeita/Pendência de informação no SAP", "n": 8},
+  {"k": "faltava nf transportadora solitou troca de prazo para dia # # a entrega", "c": "RT imperfeita/Pendência de informação no SAP", "n": 1},
+  {"k": "material com valor irrisorio", "c": "RT imperfeita/Pendência de informação no SAP", "n": 1},
+  {"k": "material unitizado errado duas rts em um unico palete", "c": "RT imperfeita/Pendência de informação no SAP", "n": 2},
+  {"k": "nf e divergente volume aguardando carta de correcao", "c": "RT imperfeita/Pendência de informação no SAP", "n": 5},
+  {"k": "pendencia de carta de correcao para corrigir a transportadora", "c": "RT imperfeita/Pendência de informação no SAP", "n": 2, "alt": "Aguardando documentação de transporte"},
+  {"k": "pendencia de envio da rt para seguir com o transporte", "c": "RT imperfeita/Pendência de informação no SAP", "n": 2},
+  {"k": "pendencia de informacoes no sap cfop cnpj", "c": "RT imperfeita/Pendência de informação no SAP", "n": 20},
+  {"k": "pendencia de nf para seguir com o transporte", "c": "RT imperfeita/Pendência de informação no SAP", "n": 1},
+  {"k": "pendencia de um novo dsm", "c": "RT imperfeita/Pendência de informação no SAP", "n": 3},
+  {"k": "pendencia do envio da rt para seguir com o transporte", "c": "RT imperfeita/Pendência de informação no SAP", "n": 1},
+  {"k": "pendencia fiscal para seguir com o transporte", "c": "RT imperfeita/Pendência de informação no SAP", "n": 2},
+  {"k": "pendencia gentileza informar cnpj cfop numero de contrato ou pedido sap e telefone externo do responsavel no destino rt suspensa", "c": "RT imperfeita/Pendência de informação no SAP", "n": 6},
+  {"k": "pendencia na liberacao do material e nf", "c": "RT imperfeita/Pendência de informação no SAP", "n": 8},
+  {"k": "pendencia na nf volume divergente", "c": "RT imperfeita/Pendência de informação no SAP", "n": 18},
+  {"k": "pendencia prezados o dsm # esta sem a retencao do icms material imob iamn favor fazer as devidas correcoes ou criar um novo dsm com icms correto rt suspensa", "c": "RT imperfeita/Pendência de informação no SAP", "n": 2},
+  {"k": "rt criada sem tempo habil de coleta e nivel de servico errado", "c": "RT imperfeita/Pendência de informação no SAP", "n": 2},
+  {"k": "sem programacao jomaga sem lep ciado", "c": "RT imperfeita/Pendência de informação no SAP", "n": 3},
+  {"k": "sem reserva ou ptm", "c": "RT imperfeita/Pendência de informação no SAP", "n": 1},
+  {"k": "status # desdobrado", "c": "RT imperfeita/Pendência de informação no SAP", "n": 1},
+  {"k": "volumedt estava errado nova coleta no dia #", "c": "RT imperfeita/Pendência de informação no SAP", "n": 1},
+  {"k": "em decorrencia das restricoes eleitorais a frota somente podera seguir para o destino em # # uma vez que a restricao abrange todos os trechos de pista simples das rodovias federais dessa forma a demanda sofreu impacto operacional e teve sua programacao ajustada para atendimento apos o periodo de restricao", "c": "Retenção de via", "n": 17},
+];
+
+// Chave de treino: mesma normalização usada para gerar a base treinada
+// (sem acentos, sem pontuação, números mascarados como #). Assim, textos que
+// só mudam data, hora ou número de pedido caem no mesmo padrão validado.
+function trainingKey(str) {
+  return normalize(str).replace(/<br\s*\/?>/g, ' ').replace(/\d+/g, '#').replace(/[^a-z#]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+const SIMILARITY_STOPWORDS = new Set('a o e de da do das dos em no na nos nas para por com sem que se um uma os as ao aos foi ser esta este essa esse pois mas ou ja nao sua seu'.split(' '));
+function similarityTokens(key) {
+  const out = new Set();
+  key.split(' ').forEach((t) => {
+    if (t.length < 3 || t.includes('#') || SIMILARITY_STOPWORDS.has(t)) return;
+    out.add(t.slice(0, 6)); // radical simples: "pendencia"/"pendencias" → "penden"
+  });
+  return out;
+}
+const SIMILARITY_STRONG = 0.8;
+const SIMILARITY_WEAK = 0.5;
+const TRAINED_BY_KEY = new Map(TRAINED_BASE.map((ex) => [ex.k, ex]));
+const TRAINED_TOKENS = TRAINED_BASE.map((ex) => ({ ex, tokens: similarityTokens(ex.k) }));
+// Vizinho mais próximo na base treinada (índice de Jaccard sobre radicais).
+function nearestTrained(key, ignoreKey) {
+  const tokens = similarityTokens(key);
+  if (tokens.size === 0) return null;
+  let best = null;
+  TRAINED_TOKENS.forEach(({ ex, tokens: other }) => {
+    if (other.size === 0 || ex.k === ignoreKey) return;
+    let inter = 0;
+    tokens.forEach((t) => { if (other.has(t)) inter++; });
+    const sim = inter / (tokens.size + other.size - inter);
+    if (!best || sim > best.sim || (sim === best.sim && ex.n > best.ex.n)) best = { ex, sim };
+  });
+  return best;
+}
+
 function greenShade(i, total) {
   const dark = [11, 110, 58], light = [149, 214, 178];
   const t = total <= 1 ? 0 : i / (total - 1);
@@ -323,17 +475,31 @@ const RULES = [
     { re: /demanda do t42/, label: 'demanda do T42', w: 5 },
   ]},
   { categoria: 'Falha na programação', patterns: [
+    // Aprendido nos pacotes de validação de 07–15/10/2026
+    { re: /^no prazo\s*-*>/, label: 'no prazo -> (registro de prazo)', w: 3 },
+    { re: /envio (da |de )?programacao csp/, label: 'envio da programação CSP', w: 4 },
+    { re: /envio do lep[\s\S]{0,120}prazo final/, label: 'envio do LEP com prazo final', w: 5 },
+    { re: /^atendido \d/, label: 'atendido em data/hora', w: 4 },
+    { re: /^finalizado no prazo/, label: 'finalizado no prazo', w: 4 },
+    { re: /demora no descarregamento/, label: 'demora no descarregamento', w: 5 },
+    { re: /em processo de descarregamento/, label: 'demanda em processo de descarregamento', w: 5 },
+    { re: /programacao realizada hoje/, label: 'programação realizada hoje', w: 5 },
+    { re: /migrado para o contrato/, label: 'material migrado de contrato', w: 5 },
+    { re: /cancelad[oa] sem (o )?motivo/, label: 'cancelado sem motivo informado', w: 6 },
     { re: /falha na programacao/, label: 'falha na programação', w: 5 },
     { re: /atendimento.{0,40}(disponivel|disponibilizado).{0,40}(dia|para)/, label: 'atendimento disponibilizado para data futura', w: 5 },
   ]},
   { categoria: 'Condições Meteorológicas', patterns: [
+    { re: /\braios?\b/, label: 'raios', w: 2 }, { re: /climaticas? adversas?/, label: 'condições climáticas adversas', w: 2 },
     { re: /\bchuva/, label: 'chuva', w: 2 }, { re: /chuvoso/, label: 'chuvoso', w: 1 }, { re: /temporal/, label: 'temporal', w: 2 },
     { re: /tempestade/, label: 'tempestade', w: 2 }, { re: /ressaca/, label: 'ressaca', w: 2 }, { re: /neblina|nevoeiro/, label: 'neblina/nevoeiro', w: 2 },
-    { re: /mau tempo|tempo ruim/, label: 'mau tempo', w: 2 }, { re: /condi[cç][aã]o(es)? climatic/, label: 'condições climáticas', w: 2 },
+    { re: /mau tempo|tempo ruim/, label: 'mau tempo', w: 2 }, { re: /condic(ao|oes) climatic/, label: 'condições climáticas', w: 2 },
     { re: /vento forte|ventania/, label: 'vento forte', w: 2 }, { re: /granizo/, label: 'granizo', w: 2 }, { re: /enchente|alagamento/, label: 'enchente/alagamento', w: 2 },
     { re: /ciclone|furacao/, label: 'ciclone/furacão', w: 2 }, { re: /\bchove/, label: 'chove', w: 1 },
   ]},
   { categoria: 'Retenção de via', patterns: [
+    { re: /restric(ao|oes) eleitora/, label: 'restrição eleitoral', w: 5 },
+    { re: /restric(ao|oes).{0,60}rodovia/, label: 'restrição em rodovia', w: 3 },
     { re: /reten[cç][aã]o de via/, label: 'retenção de via', w: 3 }, { re: /\bretid[oa]\b/, label: 'retido(a)', w: 1 },
     { re: /bloqueio/, label: 'bloqueio', w: 1 }, { re: /\bbloqueada\b/, label: 'bloqueada', w: 1 }, { re: /interdi[cç][aã]o|interditad/, label: 'interdição', w: 2 },
     { re: /\bgreve\b/, label: 'greve', w: 2 }, { re: /paralisa[cç][aã]o/, label: 'paralisação', w: 2 }, { re: /fiscaliza[cç][aã]o/, label: 'fiscalização', w: 2 },
@@ -363,6 +529,12 @@ const RULES = [
     { re: /\btos\b.{0,15}(falha|erro)/, label: 'falha no TOS', w: 2 },
   ]},
   { categoria: 'Atraso no apontamento de entrega - item no prazo', patterns: [
+    { re: /apontamento tardio/, label: 'apontamento tardio', w: 4 },
+    { re: /entregue no dia/, label: 'entregue no dia', w: 4 },
+    { re: /entregue dentro do prazo/, label: 'entregue dentro do prazo', w: 5 },
+    { re: /chegou ao destino/, label: 'frota chegou ao destino', w: 4 },
+    { re: /(encontra.?se|permanece) dentro do prazo/, label: 'demanda dentro do prazo', w: 4 },
+    { re: /nao sendo caracterizado atraso/, label: 'atraso não caracterizado', w: 5 },
     { re: /agendamento pbg.{0,80}finalizado dentro do prazo/, label: 'agendamento PBG finalizado dentro do prazo', w: 5 },
     { re: /apontamento.{0,20}(atraso|erro|falha|incorret)/, label: 'erro de apontamento', w: 3 },
     { re: /entreg(a|ue).{0,15}no prazo.{0,25}apontamento/, label: 'entrega no prazo, apontamento com erro', w: 3 },
@@ -371,6 +543,15 @@ const RULES = [
     { re: /status\s*7|finaliza[cç][aã]o.{0,35}atendimento/, label: 'finalização do Status 7', w: 4 },
   ], exclude: [/porto/] },
   { categoria: 'Falta de Equipamento de Transporte', patterns: [
+    { re: /indisponibilidade de (veiculo|frota|equipamento|carreta|caminhao)/, label: 'indisponibilidade de veículo/frota', w: 4 },
+    { re: /alta demanda/, label: 'alta demanda', w: 3 },
+    { re: /\bbackload\b/, label: 'backload', w: 2 },
+    { re: /\bprancha\b/, label: 'prancha', w: 3 },
+    { re: /\bspot\b/, label: 'contratação SPOT', w: 4 },
+    { re: /dimens(ao|oes) (do material|especial)|material de dimensao/, label: 'dimensão especial do material', w: 2 },
+    { re: /alocados em outros atendimentos/, label: 'recursos alocados em outros atendimentos', w: 4 },
+    { re: /transportadora nao teve disponibilidade/, label: 'transportadora sem disponibilidade', w: 4 },
+    { re: /falta de planejamento logistico/, label: 'falta de planejamento logístico da contratada', w: 4 },
     { re: /falta de (caminh[aã]o|carreta|conteiner|veiculo|equipamento|frota)/, label: 'falta de equipamento', w: 3 },
     { re: /sem (caminh[aã]o|carreta|conteiner|veiculo)/, label: 'sem veículo/carreta', w: 3 },
     { re: /nao (tinha|tem|havia) (caminh[aã]o|carreta|conteiner|veiculo)/, label: 'não tinha veículo disponível', w: 3 },
@@ -395,6 +576,9 @@ const RULES = [
     { re: /sem condutor/, label: 'sem condutor', w: 2 }, { re: /\bmotorista\b/, label: 'motorista', w: 1 },
   ]},
   { categoria: 'Indisponibilidade Destino', patterns: [
+    { re: /^falta de agendamento$/, label: 'falta de agendamento', w: 4 },
+    { re: /agendamento recusado/, label: 'agendamento recusado', w: 5 },
+    { re: /agendamento.{0,20}(no|do|pelo) destino/, label: 'agendamento no destino', w: 6 },
     { re: /destino fechado/, label: 'destino fechado', w: 3 }, { re: /cliente fechado/, label: 'cliente fechado', w: 3 },
     { re: /porta[oõ]?\s?fechad/, label: 'portão fechado', w: 2 },
     { re: /cliente nao recebeu/, label: 'cliente não recebeu', w: 3 }, { re: /sem espa[cç]o para descarregar/, label: 'sem espaço para descarregar', w: 3 },
@@ -407,10 +591,17 @@ const RULES = [
     { re: /(operador|empilhadeira).{0,50}(descarga|descarreg)/, label: 'recurso de descarga indisponível no destino', w: 4 },
   ]},
   { categoria: 'Indisponibilidade Origem', patterns: [
+    { re: /pendencia de agendamento/, label: 'pendência de agendamento', w: 5 },
+    { re: /aguardando agendamento/, label: 'aguardando agendamento', w: 4 },
+    { re: /indisponibilidade de janelas?/, label: 'indisponibilidade de janelas de agendamento', w: 5 },
+    { re: /sem retorno da origem/, label: 'sem retorno da origem', w: 6 },
+    { re: /aguardando disponibilidade para (a )?coleta/, label: 'aguardando disponibilidade para coleta', w: 5 },
+    { re: /agendamento na coleta/, label: 'agendamento na coleta', w: 5 },
+    { re: /nao descarregamento do load/, label: 'load não descarregado na origem', w: 6 },
     { re: /atraso no inicio do carregamento/, label: 'atraso no início do carregamento', w: 5 },
     { re: /aguardando agendamento[\s\S]{0,200}destino administrativo/, label: 'aguardando agendamento para destino administrativo', w: 5 },
     { re: /origem nao liberou/, label: 'origem não liberou', w: 3 }, { re: /fabrica nao liberou/, label: 'fábrica não liberou', w: 3 },
-    { re: /origem indisponivel/, label: 'origem indisponível', w: 3 }, { re: /nao liberado pela origem/, label: 'não liberado pela origem', w: 3 },
+    { re: /origem indisponivel/, label: 'origem indisponível', w: 3 }, { re: /nao liberado pela origem/, label: 'não liberado pela origem', w: 5 },
     { re: /fabrica fechada/, label: 'fábrica fechada', w: 2 }, { re: /produ[cç][aã]o atrasada/, label: 'produção atrasada', w: 2 },
     { re: /atraso na libera[cç][aã]o/, label: 'atraso na liberação', w: 2 }, { re: /remetente nao liberou/, label: 'remetente não liberou', w: 2 },
     { re: /\borigem\b/, label: 'origem', w: 1 }, { re: /\bfabrica\b/, label: 'fábrica', w: 1 }, { re: /\bremetente\b/, label: 'remetente', w: 1 },
@@ -423,6 +614,10 @@ const RULES = [
     { re: /\bfurto\b/, label: 'furto', w: 3 }, { re: /nao localizad/, label: 'não localizado', w: 2 }, { re: /desaparecid/, label: 'desaparecido', w: 2 }, { re: /sinistro/, label: 'sinistro', w: 2 },
   ]},
   { categoria: 'Material Indisponível', patterns: [
+    { re: /material nao (esta |estava |esta va )?disponivel/, label: 'material não disponível', w: 5 },
+    { re: /material nao (tava |estava |esta |tinha sido |foi )?liberado/, label: 'material não liberado', w: 5 },
+    { re: /disponibi\w* do material/, label: 'confirmação de disponibilidade do material', w: 4 },
+    { re: /cancelad[oa] sem retorno/, label: 'cancelado sem retorno', w: 5 },
     { re: /inicio do lep\s*24\s*horas.{0,90}finalizado/, label: 'LEP de 24 horas para atendimento', w: 5 },
     { re: /programado fora do prazo\s+\d{1,2}\/\d{1,2}/, label: 'programado fora do prazo com data', w: 5 },
     { re: /sem estoque/, label: 'sem estoque', w: 3 }, { re: /falta de estoque/, label: 'falta de estoque', w: 3 },
@@ -438,11 +633,31 @@ const RULES = [
     { re: /nao poderia realizar o recebimento/, label: 'destino impossibilitado de receber material', w: 4 },
   ]},
   { categoria: 'RT imperfeita/Pendência de informação no SAP', patterns: [
-    { re: /envio do lep[\s\S]{0,120}prazo final/, label: 'envio do LEP com prazo final pendente', w: 5 },
+    { re: /pendencia (na|de) (nf|nota fiscal)/, label: 'pendência de NF', w: 5 },
+    { re: /pendencia na liberacao do material/, label: 'pendência na liberação do material', w: 5 },
+    { re: /aguardando nf\b|faltava (a )?nf\b|faltando notas/, label: 'NF faltante', w: 5 },
+    { re: /ajuste da nota fiscal/, label: 'ajuste da nota fiscal', w: 5 },
+    { re: /(\bdtm\b|\bnf\b|nf-?e\b|nota fiscal).{0,40}divergen|divergen.{0,40}(\bdtm\b|\bnf\b|nota fiscal)/, label: 'divergência entre NF e DTM', w: 5 },
+    { re: /\bdtm\b.{0,25}(incorret|errad|divergen|volume)/, label: 'DTM incorreto', w: 5 },
+    { re: /volume ?(dt|dtm)? (estava )?(errad|divergen)/, label: 'volume errado/divergente', w: 4 },
+    { re: /ajustes? de documentacao|falha na documentacao|documentacao.{0,30}errad/, label: 'documentação com erro', w: 5 },
+    { re: /pendencia (de |do )?envio da rt/, label: 'pendência de envio da RT', w: 5 },
+    { re: /pendencia fiscal/, label: 'pendência fiscal', w: 5 },
+    { re: /\bcfop\b|\bcnpj\b|\bicms\b/, label: 'CFOP/CNPJ/ICMS', w: 3 },
+    { re: /rt suspensa/, label: 'RT suspensa por pendência', w: 4 },
+    { re: /novo dsm|dsm.{0,30}(sem a|icms)/, label: 'DSM a corrigir', w: 5 },
+    { re: /sem (reserva|ptm)/, label: 'sem reserva ou PTM', w: 5 },
+    { re: /status\s*1[14]\s*(desdobrado|desmembrado)/, label: 'status 11/14 desdobrado', w: 5 },
+    { re: /valor irrisorio/, label: 'material com valor irrisório', w: 5 },
+    { re: /unitizado errad|duas rts/, label: 'unitização incorreta', w: 5 },
+    { re: /endereco.{0,20}(errad|incorret)/, label: 'endereço incorreto', w: 5 },
+    { re: /rt criada sem tempo|nivel de servico errad/, label: 'RT criada sem tempo hábil', w: 5 },
+    { re: /\bsem lep\b/, label: 'sem LEP criado', w: 4 },
+    { re: /(falta|divergencia).{0,20}de informac(ao|oes)/, label: 'falta/divergência de informações', w: 4 },
     { re: /\brt\b.{0,20}(pendente|pendencia|incompleta|incorreta|errada|erro)/, label: 'RT com pendência', w: 3 },
     { re: /romaneio.{0,20}(pendente|incompleto|incorreto|errado)/, label: 'romaneio com pendência', w: 3 },
     { re: /sap.{0,20}(pendente|pendencia|incompleta|incorreta|dado incorreto|falta preencher)/, label: 'pendência no SAP', w: 3 },
-    { re: /pendencia de informa[cç][aã]o/, label: 'pendência de informação', w: 3 }, { re: /informa[cç][aã]o incompleta/, label: 'informação incompleta', w: 2 },
+    { re: /pendencias? de informac(ao|oes)/, label: 'pendência de informação', w: 3 }, { re: /informa[cç][aã]o incompleta/, label: 'informação incompleta', w: 2 },
     { re: /dado incorreto/, label: 'dado incorreto', w: 2 }, { re: /\bromaneio\b/, label: 'romaneio', w: 1 },
     { re: /origens? de carregamento distintas?.{0,110}destinos? diferentes/, label: 'origens e destinos divergentes na RT', w: 4 },
   ]},
@@ -455,13 +670,18 @@ const RULES = [
     { re: /(indisponibilidade.{0,35}sistema de agendamento|sistema de agendamento.{0,35}indisponivel)/, label: 'sistema de agendamento indisponível', w: 4 },
   ]},
   { categoria: 'Aguardando documentação de transporte', patterns: [
+    { re: /\baet\b/, label: 'AET (autorização especial de trânsito)', w: 5 },
+    { re: /possui agendamento previsto/, label: 'agendamento previsto na janela operacional', w: 4 },
+    { re: /pendencia (de |do )?(envio da )?documentacao/, label: 'pendência de documentação', w: 5 },
+    { re: /aguardando arquivo fiscal/, label: 'aguardando arquivo fiscal', w: 5 },
+    { re: /carta de correcao.{0,40}transportadora/, label: 'carta de correção para troca de transportadora', w: 5 },
     { re: /ajuste de programacao.{0,80}processo anexado.{0,40}csp/, label: 'ajuste de programação com processo no CSP', w: 5 },
     { re: /nota fiscal.{0,15}(pendente|atrasada|nao emitida|sem emissao)/, label: 'NF pendente', w: 3 },
     { re: /emiss[aã]o.{0,20}nota fiscal|nota fiscal.{0,20}emiss[aã]o/, label: 'emissão de NF pendente', w: 3 },
     { re: /aguardando emiss[aã]o/, label: 'aguardando emissão', w: 3 },
     { re: /\bcte\b.{0,15}(pendente|nao emitid|atrasad)/, label: 'CTe pendente', w: 3 }, { re: /aguardando (a )?documenta/, label: 'aguardando documentação', w: 3 },
     { re: /sem (a )?nota fiscal|falta (a )?nota fiscal/, label: 'sem nota fiscal', w: 2 }, { re: /licen[cç]a.{0,15}pendente/, label: 'licença pendente', w: 2 },
-    { re: /aguardando (nf|cte)/, label: 'aguardando NF/CTe', w: 2 }, { re: /nota fiscal/, label: 'nota fiscal', w: 1 }, { re: /\bcte\b/, label: 'CTe', w: 1 },
+    { re: /aguardando cte/, label: 'aguardando CTe', w: 2 }, { re: /nota fiscal/, label: 'nota fiscal', w: 1 }, { re: /\bcte\b/, label: 'CTe', w: 1 },
     { re: /(falta|ausencia) de documentacao.{0,90}\b(nf|rt)\b/, label: 'NF ou RT pendente para carregamento', w: 4 },
     { re: /aguardando.{0,35}\b(fgr|nea)\b/, label: 'FGR ou NEA pendente', w: 4 },
   ]},
@@ -484,17 +704,7 @@ const RULES = [
 // produz exatamente o mesmo resultado, sem depender de rede ou token.
 // Cada padrão tem um peso (w) — frases específicas pesam mais do que
 // palavras-chave isoladas, o que amplia a cobertura sem perder precisão.
-function classifyLocal(justificativaOriginal) {
-  const text = normalize(justificativaOriginal);
-  const validatedCategory = VALIDATED_EXACT_RULES.get(text);
-  if (validatedCategory) {
-    return {
-      categoria: validatedCategory,
-      confianca: 100,
-      racional: 'Classificação consolidada a partir de uma validação manual aprovada.',
-      causaSecundaria: null,
-    };
-  }
+function classifyByRules(text) {
   const scores = RULES.map((rule) => {
     if (rule.exclude && rule.exclude.some((re) => re.test(text))) return { categoria: rule.categoria, matched: [], score: 0 };
     const matched = rule.patterns.filter((p) => p.re.test(text));
@@ -518,6 +728,72 @@ function classifyLocal(justificativaOriginal) {
   const racional = `Termo${labels.length > 1 ? 's' : ''} identificado${labels.length > 1 ? 's' : ''} pela regra: "${labels.join('", "')}".`;
   const causaSecundaria = scores.length > 1 ? matchCategory(scores[1].categoria) : null;
   return { categoria: top.categoria, confianca, racional, causaSecundaria };
+}
+
+// Ordem de decisão do motor local:
+//  1. Texto idêntico a uma validação aprovada (regras exatas + base treinada) → 100%.
+//  2. Texto muito parecido com uma validação (≥ 80% dos termos) → categoria validada.
+//  3. Regras de palavras-chave (com os critérios aprendidos nos pacotes).
+//  4. Se as regras não reconhecerem nada, usa a validação mais parecida (≥ 50%).
+function classifyLocal(justificativaOriginal) {
+  const text = normalize(justificativaOriginal);
+  const validatedCategory = VALIDATED_EXACT_RULES.get(text);
+  if (validatedCategory) {
+    return {
+      categoria: validatedCategory,
+      confianca: 100,
+      racional: 'Classificação consolidada a partir de uma validação manual aprovada.',
+      causaSecundaria: null,
+    };
+  }
+
+  const key = trainingKey(justificativaOriginal);
+  const trained = TRAINED_BY_KEY.get(key);
+  if (trained) {
+    if (trained.alt) {
+      return {
+        categoria: REVISAO, confianca: 0,
+        racional: `Texto já validado pelo usuário, mas com decisões empatadas entre "${trained.c}" e "${trained.alt}" — confirme manualmente.`,
+        causaSecundaria: matchCategory(trained.c),
+      };
+    }
+    return {
+      categoria: trained.c,
+      confianca: 100,
+      racional: `Justificativa idêntica a ${trained.n} registro${trained.n > 1 ? 's' : ''} validado${trained.n > 1 ? 's' : ''} pelo usuário (base treinada até ${TRAINED_BASE_INFO.atualizadoEm}).`,
+      causaSecundaria: null,
+    };
+  }
+
+  const byRules = classifyByRules(text);
+  const nn = nearestTrained(key);
+  const nnUsable = nn && !nn.ex.alt;
+  const pct = nn ? Math.round(nn.sim * 100) : 0;
+  const trecho = nn ? (nn.ex.k.length > 90 ? `${nn.ex.k.slice(0, 90)}…` : nn.ex.k) : '';
+
+  if (nnUsable && nn.sim >= SIMILARITY_STRONG) {
+    if (byRules.categoria === nn.ex.c) {
+      return { ...byRules, confianca: Math.max(byRules.confianca, 95), racional: `${byRules.racional} Confirmado por justificativa validada semelhante (${pct}%).` };
+    }
+    return {
+      categoria: nn.ex.c,
+      confianca: 88,
+      racional: `Muito semelhante (${pct}%) a uma justificativa validada pelo usuário: "${trecho}".`,
+      causaSecundaria: byRules.categoria !== REVISAO ? matchCategory(byRules.categoria) : null,
+    };
+  }
+  if (byRules.categoria === REVISAO && nnUsable && nn.sim >= SIMILARITY_WEAK) {
+    return {
+      categoria: nn.ex.c,
+      confianca: nn.sim >= 0.65 ? 72 : 60,
+      racional: `Nenhuma regra reconhecida; categoria sugerida pela justificativa validada mais parecida (${pct}%): "${trecho}".`,
+      causaSecundaria: byRules.causaSecundaria || null,
+    };
+  }
+  if (nnUsable && nn.sim >= SIMILARITY_WEAK && byRules.categoria === nn.ex.c) {
+    return { ...byRules, confianca: Math.min(95, byRules.confianca + 8), racional: `${byRules.racional} Reforçado por justificativa validada semelhante (${pct}%).` };
+  }
+  return byRules;
 }
 
 /* ------------------------------------------------------------------ */
